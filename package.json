@@ -1,6 +1,6 @@
 {
   "name": "proxy-rules",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "MITM forward proxy with per-domain TypeScript rule plugins",
   "license": "MIT",
   "type": "module",
