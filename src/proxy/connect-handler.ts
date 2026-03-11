@@ -88,6 +88,202 @@ function createPassthroughTunnel(
   });
 }
 
+async function createInterceptTunnel(
+  clientSocket: net.Socket,
+  head: Buffer,
+  hostname: string,
+  domain: string,
+  proxy: httpProxy,
+  registry: PluginRegistry,
+  config: ProxyConfig,
+  certPem: string,
+  keyPem: string,
+): Promise<void> {
+  const logger = getLogger();
+
+  const innerServer = http.createServer((innerReq, innerRes) => {
+    if (!innerReq.headers["host"]) {
+      innerReq.headers["host"] = hostname;
+    }
+    handleHttpRequest(innerReq, innerRes, proxy, registry, config);
+  });
+
+  innerServer.on("upgrade", (innerReq, innerSocket, innerHead) => {
+    handleWebSocketUpgrade(innerReq, innerSocket as net.Socket, innerHead, proxy, registry, config);
+  });
+
+  innerServer.on("error", (err) => {
+    logger.debug("Inner CONNECT server error", { domain, error: err.message });
+  });
+
+  innerServer.on("clientError", (err, socket) => {
+    logger.debug("Inner HTTP parser error", { domain, error: err.message });
+    socket.destroy();
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    let mitmServer: tls.Server | undefined;
+
+    let settled = false;
+
+    const finish = (err?: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    };
+
+    const cleanup = () => {
+      innerServer.close();
+      mitmServer?.close();
+    };
+
+    clientSocket.on("error", (err) => {
+      logger.debug("Client socket error during CONNECT", { domain, error: err.message });
+    });
+
+    innerServer.listen(0, "127.0.0.1", () => {
+      const innerAddress = innerServer.address();
+      if (!innerAddress || typeof innerAddress === "string") {
+        finish(new Error("Failed to resolve local inner HTTP server address"));
+        return;
+      }
+
+      logger.debug("Inner HTTP bridge server listening", {
+        domain,
+        port: innerAddress.port,
+      });
+
+      mitmServer = tls.createServer(
+        {
+          key: keyPem,
+          cert: certPem,
+          ALPNProtocols: ["http/1.1"],
+        },
+        (tlsSocket) => {
+          logger.debug("MITM TLS server accepted secure connection", { domain });
+
+          tlsSocket.pause();
+          const pendingChunks: Buffer[] = [];
+          let innerBridgeReady = false;
+
+          tlsSocket.on("error", (err) => {
+            logger.debug("TLS socket error", { domain, error: err.message });
+          });
+
+          tlsSocket.on("data", (chunk) => {
+            if (!innerBridgeReady) {
+              pendingChunks.push(Buffer.from(chunk));
+              return;
+            }
+
+            const ok = innerBridgeSocket.write(chunk);
+            if (!ok) {
+              tlsSocket.pause();
+            }
+          });
+
+          const innerBridgeSocket = net.connect(innerAddress.port, "127.0.0.1", () => {
+            logger.debug("Connected decrypted TLS stream to inner HTTP server", { domain });
+
+            innerBridgeReady = true;
+
+            for (const chunk of pendingChunks) {
+              const ok = innerBridgeSocket.write(chunk);
+              if (!ok) {
+                tlsSocket.pause();
+                break;
+              }
+            }
+
+            pendingChunks.length = 0;
+
+            innerBridgeSocket.on("drain", () => {
+              tlsSocket.resume();
+            });
+
+            innerBridgeSocket.on("data", (chunk) => {
+              const ok = tlsSocket.write(chunk);
+              if (!ok) {
+                innerBridgeSocket.pause();
+              }
+            });
+
+            tlsSocket.on("drain", () => {
+              innerBridgeSocket.resume();
+            });
+
+            tlsSocket.resume();
+          });
+
+          innerBridgeSocket.on("error", (err) => {
+            logger.debug("Inner HTTP bridge socket error", { domain, error: err.message });
+            tlsSocket.destroy();
+            cleanup();
+          });
+
+          innerBridgeSocket.on("close", cleanup);
+          tlsSocket.on("close", () => {
+            innerBridgeSocket.destroy();
+            cleanup();
+          });
+        },
+      );
+
+      mitmServer.on("tlsClientError", (err) => {
+        logger.debug("TLS client handshake error", { domain, error: err.message });
+      });
+
+      mitmServer.on("error", (err) => {
+        logger.debug("TLS server error", { domain, error: err.message });
+        finish(err);
+      });
+
+      mitmServer.listen(0, "127.0.0.1", () => {
+        const mitmAddress = mitmServer?.address();
+        if (!mitmAddress || typeof mitmAddress === "string") {
+          finish(new Error("Failed to resolve local MITM server address"));
+          return;
+        }
+
+        logger.debug("Local MITM TLS bridge server listening", {
+          domain,
+          port: mitmAddress.port,
+        });
+
+        const bridgeSocket = net.connect(mitmAddress.port, "127.0.0.1", () => {
+          logger.debug("Client CONNECT tunnel bridged into local MITM TLS server", {
+            domain,
+          });
+          clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+
+          if (head.length > 0) {
+            bridgeSocket.write(head);
+          }
+
+          clientSocket.pipe(bridgeSocket);
+          bridgeSocket.pipe(clientSocket);
+          finish();
+        });
+
+        bridgeSocket.on("error", (err) => {
+          logger.debug("Local MITM bridge socket error", { domain, error: err.message });
+          cleanup();
+          finish(err);
+        });
+
+        bridgeSocket.on("close", cleanup);
+        clientSocket.on("close", cleanup);
+      });
+    });
+  });
+}
+
 /**
  * Handle an HTTP CONNECT request by performing MITM TLS interception.
  *
@@ -140,9 +336,6 @@ export async function handleConnect(
     }
   }
 
-  // Respond to client: tunnel acknowledged
-  clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-
   // Obtain (or generate) a leaf cert for this domain
   let certPem: string;
   let keyPem: string;
@@ -159,42 +352,15 @@ export async function handleConnect(
     return;
   }
 
-  // Create a local TLS server that impersonates the target
-  const tlsServer = new tls.TLSSocket(clientSocket, {
-    isServer: true,
-    key: keyPem,
-    cert: certPem,
-  });
-
-  tlsServer.on("error", (err) => {
-    logger.debug("TLS socket error", { domain, error: err.message });
-  });
-
-  clientSocket.on("error", (err) => {
-    logger.debug("Client socket error during CONNECT", { domain, error: err.message });
-  });
-
-  // Spin up a minimal HTTP(S) server to parse the decrypted stream
-  const innerServer = http.createServer((innerReq, innerRes) => {
-    // Restore the original host so plugin resolution works consistently
-    if (!innerReq.headers["host"]) {
-      innerReq.headers["host"] = hostname;
-    }
-    handleHttpRequest(innerReq, innerRes, proxy, registry, config, ca);
-  });
-
-  innerServer.on("upgrade", (innerReq, innerSocket, innerHead) => {
-    handleWebSocketUpgrade(innerReq, innerSocket as net.Socket, innerHead, proxy, registry, config);
-  });
-
-  innerServer.on("error", (err) => {
-    logger.debug("Inner CONNECT server error", { domain, error: err.message });
-  });
-
-  // Feed the TLS socket to the inner HTTP parser
-  innerServer.emit("connection", tlsServer);
-
-  if (head && head.length > 0) {
-    tlsServer.unshift(head);
-  }
+  await createInterceptTunnel(
+    clientSocket,
+    head,
+    hostname,
+    domain,
+    proxy,
+    registry,
+    config,
+    certPem,
+    keyPem,
+  );
 }
