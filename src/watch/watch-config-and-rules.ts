@@ -12,7 +12,7 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null;
  * In-flight requests will continue using the old registry snapshot because
  * the registry is replaced atomically (not mutated in place).
  */
-export function watchRules(rulesDir: string, registry: PluginRegistry, ignoreSubDomains: string[]): void {
+export function watchRules(rulesDir: string, registry: PluginRegistry): chokidar.FSWatcher {
   const logger = getLogger();
 
   const watcher = chokidar.watch(rulesDir, {
@@ -52,4 +52,6 @@ export function watchRules(rulesDir: string, registry: PluginRegistry, ignoreSub
   });
 
   logger.debug("Watching rules directory for changes", { rulesDir });
+
+  return watcher;
 }

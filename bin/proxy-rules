@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+# Resolve symlinks to find the real script location
+SELF="$0"
+while [ -L "$SELF" ]; do
+  SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  case "$SELF" in /*) ;; *) SELF="$SELF_DIR/$SELF" ;; esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+
+if command -v bun >/dev/null 2>&1; then
+  exec bun "$SCRIPT_DIR/../src/index.ts" "$@"
+else
+  exec node "$SCRIPT_DIR/../dist/index.js" "$@"
+fi

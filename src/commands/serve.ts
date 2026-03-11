@@ -58,7 +58,7 @@ export function registerServeCommand(program: Command): void {
 
       // Start hot reload
       if (config.pluginHotReload) {
-        watchRules(paths.rulesDir, registry, config.ignoreSubDomains);
+        watchRules(paths.rulesDir, registry);
       }
 
       // Create proxy engine
@@ -66,7 +66,7 @@ export function registerServeCommand(program: Command): void {
 
       // Main HTTP/proxy server
       const server = http.createServer((req, res) => {
-        handleHttpRequest(req, res, proxy, registry, config, ca!);
+        handleHttpRequest(req, res, proxy, registry, config, ca);
       });
 
       // WebSocket upgrade

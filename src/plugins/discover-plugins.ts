@@ -1,5 +1,6 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ProxyRule } from "./types.ts";
 import { getLogger } from "../logging/logger.ts";
 
@@ -14,7 +15,15 @@ export interface DiscoveredPlugin {
  */
 async function importRule(filePath: string): Promise<ProxyRule | null> {
   try {
-    const mod = await import(filePath);
+    // Bust Bun's module cache so hot-reload picks up changed rule files.
+    // Bun keys require.cache by the *realpath* (symlink-resolved), which on macOS
+    // differs from the path returned by mkdtemp/tmpdir (/var vs /private/var).
+    // query strings on file:// URLs also have no effect, so realpath deletion
+    // is the only reliable mechanism. See: https://github.com/oven-sh/bun/issues/12371
+    const realFilePath = realpathSync(filePath);
+    delete (require.cache as Record<string, unknown>)[realFilePath];
+
+    const mod = await import(pathToFileURL(realFilePath).href);
     const rule = mod.default as ProxyRule | undefined;
     if (!rule || typeof rule !== "object") {
       getLogger().warn(`Plugin file ${filePath} has no default export — skipping`);
@@ -34,7 +43,9 @@ async function importRule(filePath: string): Promise<ProxyRule | null> {
  * Later rules override scalar fields; hooks are composed (all called in order).
  */
 function mergeRules(rules: ProxyRule[]): ProxyRule {
-  if (rules.length === 1) return rules[0]!;
+  if (rules.length === 1) {
+    return rules[0] as ProxyRule;
+  }
 
   const merged: ProxyRule = {};
 

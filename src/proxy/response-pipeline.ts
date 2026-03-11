@@ -1,7 +1,6 @@
 import type http from "node:http";
-import type httpProxy from "http-proxy";
+import httpProxy from "http-proxy";
 import type { ProxyRule } from "../plugins/types.ts";
-import { getLogger } from "../logging/logger.ts";
 import type { ProxyConfig } from "../config/schema.ts";
 import type { Logger } from "../logging/logger.ts";
 
@@ -19,72 +18,134 @@ function isTextContentType(contentType: string | undefined): boolean {
   return TEXT_CONTENT_TYPES.some((t) => contentType.includes(t));
 }
 
+function getSingleHeaderValue(header: string | string[] | undefined): string | undefined {
+  return Array.isArray(header) ? header[0] : header;
+}
+
+function buildMutatedResponseHeaders(headers: http.IncomingHttpHeaders, body: string): http.OutgoingHttpHeaders {
+  const nextHeaders: http.OutgoingHttpHeaders = { ...headers };
+  nextHeaders["content-length"] = Buffer.byteLength(body, "utf8").toString();
+  delete nextHeaders["transfer-encoding"];
+  delete nextHeaders["content-encoding"];
+  delete nextHeaders["etag"];
+
+  return nextHeaders;
+}
+
 /**
  * Run the selfHandleResponse pipeline used when a rule declares `modifyResponseBody`.
  * Buffers the upstream response body (up to maxBodyBytes), calls the modifier,
  * then writes the result to the client.
+ *
+ * IMPORTANT: We create a REQUEST-SCOPED httpProxy instance instead of using the
+ * global shared one.  The shared proxy is an EventEmitter; `proxy.once("proxyRes",
+ * handler)` registers a one-shot listener on it.  With concurrent requests every
+ * handler fires for whichever upstream response arrives first — not necessarily
+ * the right one.  An isolated proxy per-call eliminates that race completely.
  */
 export function runResponsePipeline(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  proxy: httpProxy,
+  _sharedProxy: httpProxy,   // kept in signature for call-site compat, not used here
   target: string,
   rule: ProxyRule,
   domain: string,
   config: ProxyConfig,
   logger: Logger,
 ): void {
-  const maxBodyBytes = config.logging.maxBodyBytes;
+  const startTime = Date.now();
+
+  // Isolated proxy — events cannot bleed between concurrent requests.
+  const proxy = httpProxy.createProxyServer({ changeOrigin: true, secure: false });
+
+  proxy.on("error", (err, _req, _res) => {
+    logger.error("Proxy error in pipeline", { domain, error: err.message });
+    if (!res.headersSent) {
+      res.writeHead(502, { "Content-Type": "text/plain" });
+    }
+    if (!res.writableEnded) res.end("Bad Gateway — proxy error");
+  });
+
+  // Inject accept-encoding: identity so the upstream never gzip-encodes the body
+  // (we can't decode compressed streams, so we'd be forced to passthrough unchanged).
+  // Also run the optional onRequest hook from the rule.
+  proxy.once("proxyReq", (proxyReq: http.ClientRequest) => {
+    proxyReq.setHeader("accept-encoding", "identity");
+    if (rule.onRequest) {
+      void (async () => {
+        try {
+          await rule.onRequest!({ req, proxyReq, res, domain, url: req.url ?? "" });
+        } catch (err) {
+          logger.error("onRequest hook error", { domain, error: (err as Error).message });
+        }
+      })();
+    }
+  });
+
+  // config.logging.maxBodyBytes is 0 when body logging is disabled.
+  // For body modification we need a meaningful cap — treat 0 as "no logging
+  // limit" and fall back to a sane 10 MB ceiling so modifyResponseBody runs
+  // for typical API responses regardless of the logging setting.
+  const loggingMaxBytes = config.logging.maxBodyBytes;
+  const modifyMaxBytes = loggingMaxBytes > 0 ? loggingMaxBytes : 10 * 1024 * 1024;
 
   proxy.once("proxyRes", (proxyRes: http.IncomingMessage) => {
-    const contentType = proxyRes.headers["content-type"];
-
-    // Forward status and headers
-    res.writeHead(proxyRes.statusCode ?? 200, proxyRes.headers);
+    const statusCode = proxyRes.statusCode ?? 200;
+    const contentType = getSingleHeaderValue(proxyRes.headers["content-type"]);
+    const contentEncoding = getSingleHeaderValue(proxyRes.headers["content-encoding"]);
 
     // Only buffer and mutate text-like responses within the size limit
-    const contentLength = parseInt(proxyRes.headers["content-length"] ?? "0", 10);
+    const contentLength = parseInt(getSingleHeaderValue(proxyRes.headers["content-length"]) ?? "0", 10);
     const canBuffer =
       isTextContentType(contentType) &&
-      (contentLength === 0 || contentLength <= maxBodyBytes);
+      (!contentEncoding || contentEncoding.toLowerCase() === "identity") &&
+      (contentLength === 0 || contentLength <= modifyMaxBytes);
+    const modifyResponseBody = rule.modifyResponseBody;
 
-    if (!canBuffer || !rule.modifyResponseBody) {
+    if (!canBuffer || !modifyResponseBody) {
+      res.writeHead(proxyRes.statusCode ?? 200, proxyRes.headers);
       proxyRes.pipe(res);
       return;
     }
 
     const chunks: Buffer[] = [];
     let size = 0;
+    let fellBackToPassthrough = false;
 
-    proxyRes.on("data", (chunk: Buffer) => {
+    const onData = (chunk: Buffer) => {
       size += chunk.length;
-      if (size <= maxBodyBytes) {
+      if (size <= modifyMaxBytes) {
         chunks.push(chunk);
       } else {
         // Buffer overrun — fall back to passthrough
-        logger.warn("Response body exceeded maxBodyBytes, falling back to passthrough", {
+        logger.warn("Response body exceeded modify limit, falling back to passthrough", {
           domain,
           contentType,
           size,
-          maxBodyBytes,
+          modifyMaxBytes,
         });
-        // Drain remaining chunks directly to res
-        const buffered = Buffer.concat(chunks);
+
+        fellBackToPassthrough = true;
+        proxyRes.off("data", onData);
+        res.writeHead(statusCode, proxyRes.headers);
+
+        const buffered = Buffer.concat([...chunks, chunk]);
         res.write(buffered);
         chunks.length = 0;
         proxyRes.pipe(res);
-        proxyRes.removeAllListeners("data");
       }
-    });
+    };
+
+    proxyRes.on("data", onData);
 
     proxyRes.on("end", async () => {
-      if (chunks.length === 0) return; // already piped above
+      if (fellBackToPassthrough || chunks.length === 0) return;
 
       const body = Buffer.concat(chunks).toString("utf-8");
       let modified: string | undefined;
 
       try {
-        modified = await rule.modifyResponseBody!(body, {
+        modified = await modifyResponseBody(body, {
           req,
           proxyRes,
           res,
@@ -98,12 +159,35 @@ export function runResponsePipeline(
         });
       }
 
-      res.end(modified !== undefined ? modified : body);
+      // Run optional onResponse hook before we write the (possibly mutated) response.
+      if (rule.onResponse) {
+        try {
+          await rule.onResponse({ req, proxyRes, res, domain });
+        } catch (err) {
+          logger.error("onResponse hook error", { domain, error: (err as Error).message });
+        }
+      }
+
+      const finalBody = modified !== undefined ? modified : body;
+      res.writeHead(
+        statusCode,
+        buildMutatedResponseHeaders(proxyRes.headers, finalBody),
+      );
+      res.end(finalBody);
+
+      logger.info("\u2190 HTTP", {
+        method: req.method,
+        url: req.url,
+        domain,
+        status: statusCode,
+        ms: Date.now() - startTime,
+        bodyModified: modified !== undefined,
+      });
     });
 
     proxyRes.on("error", (err) => {
       logger.error("proxyRes stream error", { domain, error: err.message });
-      res.end();
+      if (!res.writableEnded) res.end();
     });
   });
 

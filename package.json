@@ -1,6 +1,6 @@
 {
   "name": "proxy-rules",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "MITM forward proxy with per-domain TypeScript rule plugins",
   "license": "MIT",
   "type": "module",
@@ -16,12 +16,13 @@
     "bun": ">=1.3.9"
   },
   "files": [
+    "bin",
     "dist",
     "README.md",
     "LICENSE"
   ],
   "bin": {
-    "proxy-rules": "./dist/index.js"
+    "proxy-rules": "./bin/proxy-rules"
   },
   "exports": {
     "./types": {
