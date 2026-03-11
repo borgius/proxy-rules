@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { loadConfig } from "../src/config/load-config.ts";
+import { parseConnectTarget, shouldInterceptConnect } from "../src/proxy/connect-handler.ts";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PluginRegistry } from "../src/plugins/plugin-registry.ts";
 
 const FIXTURES_DIR = join(import.meta.dir, "fixtures/proxy-rules");
 
@@ -123,5 +125,37 @@ describe("loadConfig", () => {
       rmSync(globalDir, { recursive: true, force: true });
       rmSync(workspaceDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("CONNECT handling helpers", () => {
+  test("parses standard CONNECT authority", () => {
+    expect(parseConnectTarget("example.com:8443")).toEqual({
+      authority: "example.com:8443",
+      hostname: "example.com",
+      port: 8443,
+    });
+  });
+
+  test("parses IPv6 CONNECT authority", () => {
+    expect(parseConnectTarget("[::1]:443")).toEqual({
+      authority: "[::1]:443",
+      hostname: "[::1]",
+      port: 443,
+    });
+  });
+
+  test("intercepts only domains that have rules", () => {
+    const registry = new PluginRegistry(["www"]);
+    registry.replace([
+      {
+        domain: "example.com",
+        rule: { target: "https://example.com" },
+      },
+    ]);
+
+    expect(shouldInterceptConnect("example.com:443", registry)).toBe(true);
+    expect(shouldInterceptConnect("www.example.com:443", registry)).toBe(true);
+    expect(shouldInterceptConnect("google.com:443", registry)).toBe(false);
   });
 });

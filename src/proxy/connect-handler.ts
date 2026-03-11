@@ -12,6 +12,82 @@ import { handleHttpRequest } from "./http-handler.ts";
 import { handleWebSocketUpgrade } from "./websocket-handler.ts";
 import { getLogger } from "../logging/logger.ts";
 
+export interface ConnectTarget {
+  authority: string;
+  hostname: string;
+  port: number;
+}
+
+export function parseConnectTarget(authority: string): ConnectTarget {
+  const trimmed = authority.trim();
+
+  if (trimmed.startsWith("[")) {
+    const end = trimmed.indexOf("]");
+    const hostname = end !== -1 ? trimmed.slice(0, end + 1) : trimmed;
+    const portPart = end !== -1 && trimmed[end + 1] === ":"
+      ? trimmed.slice(end + 2)
+      : "";
+
+    return {
+      authority: trimmed,
+      hostname,
+      port: Number.parseInt(portPart, 10) || 443,
+    };
+  }
+
+  const separator = trimmed.lastIndexOf(":");
+  const hasPort = separator !== -1 && trimmed.indexOf(":") === separator;
+
+  return {
+    authority: trimmed,
+    hostname: hasPort ? trimmed.slice(0, separator) : trimmed,
+    port: hasPort ? Number.parseInt(trimmed.slice(separator + 1), 10) || 443 : 443,
+  };
+}
+
+export function shouldInterceptConnect(
+  authority: string,
+  registry: PluginRegistry,
+): boolean {
+  const { hostname } = parseConnectTarget(authority);
+  return registry.resolve(hostname) !== null;
+}
+
+function createPassthroughTunnel(
+  clientSocket: net.Socket,
+  target: ConnectTarget,
+  head: Buffer,
+  domain: string,
+): void {
+  const logger = getLogger();
+  const upstreamSocket = net.connect(target.port, target.hostname, () => {
+    clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+
+    if (head.length > 0) {
+      upstreamSocket.write(head);
+    }
+
+    clientSocket.pipe(upstreamSocket);
+    upstreamSocket.pipe(clientSocket);
+  });
+
+  upstreamSocket.on("error", (err) => {
+    logger.debug("Upstream passthrough socket error", { domain, error: err.message });
+    if (!clientSocket.destroyed) {
+      clientSocket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+      clientSocket.destroy();
+    }
+  });
+
+  clientSocket.on("error", (err) => {
+    logger.debug("Client socket error during passthrough CONNECT", {
+      domain,
+      error: err.message,
+    });
+    upstreamSocket.destroy();
+  });
+}
+
 /**
  * Handle an HTTP CONNECT request by performing MITM TLS interception.
  *
@@ -34,9 +110,9 @@ export async function handleConnect(
   paths: ResolvedPaths,
 ): Promise<void> {
   const logger = getLogger();
-  const authority = req.url ?? "";
-  const [hostPart] = authority.split(":");
-  const hostname = hostPart ?? authority;
+  const target = parseConnectTarget(req.url ?? "");
+  const authority = target.authority;
+  const hostname = target.hostname;
   const domain = normalizeHostname(
     extractHostname(hostname),
     config.ignoreSubDomains,
@@ -46,6 +122,16 @@ export async function handleConnect(
 
   // Fire onConnect hook if defined
   const rule = registry.resolve(hostname);
+
+  if (!rule) {
+    logger.debug("No matching rule for CONNECT — using passthrough tunnel", {
+      authority,
+      domain,
+    });
+    createPassthroughTunnel(clientSocket, target, head, domain);
+    return;
+  }
+
   if (rule?.onConnect) {
     try {
       await rule.onConnect({ socket: clientSocket, authority, domain });

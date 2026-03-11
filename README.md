@@ -72,6 +72,8 @@ Settings from the project-local `config.json` override the global file, while ge
 
 If you pass `--rules`, only the rules directory changes; config merging and cert storage keep using the normal resolution rules.
 
+HTTPS interception is now rule-driven too: domains without a matching rule are tunneled through untouched, so the browser sees the real site certificate. A hostname-specific leaf cert is generated only when a rule requires HTTPS interception. The trusted root CA remains the trust anchor; it cannot replace per-host certificates for intercepted domains.
+
 Example layout:
 
 ```text
