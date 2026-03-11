@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { loadConfig } from "../src/config/load-config.ts";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const FIXTURES_DIR = join(import.meta.dir, "fixtures/proxy-rules");
+
+function createTempDir(name: string): string {
+  return mkdtempSync(join(tmpdir(), `${name}-`));
+}
 
 describe("loadConfig", () => {
   test("loads and parses fixture config.json", () => {
@@ -36,5 +42,86 @@ describe("loadConfig", () => {
     fs.writeFileSync(join(tmpDir, "config.json"), "{ invalid json }");
     expect(() => loadConfig(tmpDir)).toThrow();
     fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  test("merges global config with project-local rules and overrides", () => {
+    const globalDir = createTempDir("proxy-rules-global");
+    const workspaceDir = createTempDir("proxy-rules-workspace");
+    const projectConfigDir = join(workspaceDir, ".proxy-rules");
+
+    try {
+      mkdirSync(join(workspaceDir, ".git"), { recursive: true });
+      mkdirSync(join(projectConfigDir, "rules"), { recursive: true });
+
+      writeFileSync(
+        join(globalDir, "config.json"),
+        JSON.stringify({
+          host: "127.0.0.1",
+          logging: {
+            format: "json",
+            maxBodyBytes: 1024,
+          },
+          upstreamTimeout: 45_000,
+        }),
+      );
+
+      writeFileSync(
+        join(projectConfigDir, "config.json"),
+        JSON.stringify({
+          port: 9090,
+          logging: {
+            level: "debug",
+          },
+          pluginHotReload: false,
+        }),
+      );
+
+      const { config, paths } = loadConfig({
+        cwd: workspaceDir,
+        defaultConfigDir: globalDir,
+      });
+
+      expect(config.port).toBe(9090);
+      expect(config.host).toBe("127.0.0.1");
+      expect(config.logging.level).toBe("debug");
+      expect(config.logging.format).toBe("json");
+      expect(config.logging.maxBodyBytes).toBe(1024);
+      expect(config.pluginHotReload).toBe(false);
+      expect(config.upstreamTimeout).toBe(45_000);
+      expect(paths.rulesDir).toBe(join(projectConfigDir, "rules"));
+      expect(paths.caCertPath).toBe(join(globalDir, "certs", "ca-cert.pem"));
+      expect(paths.configFiles).toEqual([
+        join(globalDir, "config.json"),
+        join(projectConfigDir, "config.json"),
+      ]);
+    } finally {
+      rmSync(globalDir, { recursive: true, force: true });
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("uses rules override without changing cert location", () => {
+    const globalDir = createTempDir("proxy-rules-global");
+    const workspaceDir = createTempDir("proxy-rules-workspace");
+    const projectConfigDir = join(workspaceDir, ".proxy-rules");
+    const customRulesDir = join(workspaceDir, "custom-rules");
+
+    try {
+      mkdirSync(join(workspaceDir, ".git"), { recursive: true });
+      mkdirSync(join(projectConfigDir, "rules"), { recursive: true });
+      mkdirSync(customRulesDir, { recursive: true });
+
+      const { paths } = loadConfig({
+        cwd: workspaceDir,
+        defaultConfigDir: globalDir,
+        rulesDir: customRulesDir,
+      });
+
+      expect(paths.rulesDir).toBe(customRulesDir);
+      expect(paths.caKeyPath).toBe(join(globalDir, "certs", "ca-key.pem"));
+    } finally {
+      rmSync(globalDir, { recursive: true, force: true });
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 });

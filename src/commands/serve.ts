@@ -18,13 +18,18 @@ export function registerServeCommand(program: Command): void {
   program
     .command("serve")
     .description("Start the MITM proxy server")
-    .option("--config <path>", "Config root directory", "~/.proxy-rules")
+    .option("--config <path>", "Config root directory")
+    .option("--rules <path>", "Rules directory override")
     .option("--port <n>", "Listening port", (v) => parseInt(v, 10))
     .option("--host <addr>", "Bind address")
-    .action(async (opts: { config: string; port?: number; host?: string }) => {
-      const { config, paths } = loadConfig(opts.config, {
-        port: opts.port,
-        host: opts.host,
+    .action(async (opts: { config?: string; rules?: string; port?: number; host?: string }) => {
+      const { config, paths } = loadConfig({
+        configDir: opts.config,
+        rulesDir: opts.rules,
+        overrides: {
+          port: opts.port,
+          host: opts.host,
+        },
       });
 
       initLogger(config.logging);
@@ -87,6 +92,10 @@ export function registerServeCommand(program: Command): void {
 
       server.listen(config.port, config.host, () => {
         const addr = `${config.host}:${config.port}`;
+        const configSources = paths.configFiles.length > 0
+          ? paths.configFiles.map((file) => `    - ${picocolors.dim(file)}`).join("\n")
+          : `    - ${picocolors.dim(paths.configFile)}`;
+
         process.stdout.write(
           [
             "",
@@ -97,7 +106,8 @@ export function registerServeCommand(program: Command): void {
             `    HTTPS Proxy: ${picocolors.cyan(addr)}`,
             "",
             `  Rules directory: ${picocolors.dim(paths.rulesDir)}`,
-            `  Config:          ${picocolors.dim(paths.configFile)}`,
+            "  Config files:",
+            configSources,
             "",
             "  Press Ctrl+C to stop.",
             "",

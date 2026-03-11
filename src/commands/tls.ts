@@ -10,9 +10,9 @@ export function registerTlsCommand(program: Command): void {
   program
     .command("tls")
     .description("Create the local CA certificate and attempt to install it as a trusted root")
-    .option("--config <path>", "Config root directory", "~/.proxy-rules")
-    .action(async (opts: { config: string }) => {
-      const { config, paths } = loadConfig(opts.config);
+    .option("--config <path>", "Config root directory")
+    .action(async (opts: { config?: string }) => {
+      const { config, paths } = loadConfig({ configDir: opts.config });
       initLogger(config.logging);
       const logger = getLogger();
 

@@ -17,7 +17,7 @@ export function handleHttpRequest(
   proxy: httpProxy,
   registry: PluginRegistry,
   config: ProxyConfig,
-  ca: CaAssets,
+  _ca?: CaAssets,
 ): void {
   const logger = getLogger();
 

@@ -33,7 +33,7 @@ bun install -g proxy-rules
 Creates a local Certificate Authority (CA) in `~/.proxy-rules/certs/` and attempts to install it into the system trust store so browsers trust HTTPS MITM traffic.
 
 ```bash
-proxy-rules tls [--config ~/.proxy-rules]
+proxy-rules tls [--config <path>]
 ```
 
 Run this once before starting the proxy for the first time.
@@ -43,7 +43,7 @@ Run this once before starting the proxy for the first time.
 Start the proxy server.
 
 ```bash
-proxy-rules serve [--config ~/.proxy-rules] [--port 8080] [--host 0.0.0.0]
+proxy-rules serve [--config <path>] [--rules <path>] [--port 8080] [--host 0.0.0.0]
 ```
 
 ---
@@ -52,9 +52,39 @@ proxy-rules serve [--config ~/.proxy-rules] [--port 8080] [--host 0.0.0.0]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--config <path>` | `~/.proxy-rules` | Path to the config root directory |
+| `--config <path>` | auto-detect | Use a single config root directory and skip layered lookup |
+| `--rules <path>` | auto-detect | Override only the rules directory |
 | `--port <n>` | `8080` | Listening port |
 | `--host <addr>` | `0.0.0.0` | Bind address |
+
+---
+
+## Config resolution
+
+If you pass `--config`, that directory is used for config, rules, certs, and other generated files exactly as before.
+
+Without `--config`, `proxy-rules` now resolves config in layers:
+
+1. `~/.proxy-rules`
+2. `<git-root>/.proxy-rules` (if the current working directory is inside a git repo and that folder exists)
+
+Settings from the project-local `config.json` override the global file, while generated TLS assets continue to live under `~/.proxy-rules/certs/` by default. This makes it easy to keep shared certs in your home directory and version project-specific rules inside the repository.
+
+If you pass `--rules`, only the rules directory changes; config merging and cert storage keep using the normal resolution rules.
+
+Example layout:
+
+```text
+~/.proxy-rules/
+├── config.json          # shared defaults + TLS settings
+└── certs/
+
+my-project/
+├── .git/
+└── .proxy-rules/
+  ├── config.json      # project-specific overrides
+  └── rules/
+```
 
 ---
 
@@ -97,7 +127,7 @@ proxy-rules serve [--config ~/.proxy-rules] [--port 8080] [--host 0.0.0.0]
 
 ## Rule plugins
 
-A rule plugin is a TypeScript file (or `index.ts` in a folder) that exports a default `ProxyRule` object. Rules for a domain are matched by normalising the requested hostname (stripping configured `ignoreSubDomains` entries like `www`) and looking up a matching folder under `~/.proxy-rules/rules/`.
+A rule plugin is a TypeScript file (or `index.ts` in a folder) that exports a default `ProxyRule` object. Rules for a domain are matched by normalising the requested hostname (stripping configured `ignoreSubDomains` entries like `www`) and looking up a matching folder under the active rules directory (`--rules`, `<git-root>/.proxy-rules/rules`, or `~/.proxy-rules/rules`).
 
 ### Minimal example
 
