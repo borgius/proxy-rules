@@ -9,7 +9,9 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 
 if command -v bun >/dev/null 2>&1; then
+  echo "Bun detected, running with Bun. For best performance, install Bun 1.3.9 or later."
   exec bun "$SCRIPT_DIR/../src/index.ts" "$@"
 else
+  echo "Bun not detected, running with Node.js. For best performance, install Bun 1.3.9 or later and run 'bun install' to set up dependencies."
   exec node "$SCRIPT_DIR/../dist/index.js" "$@"
 fi

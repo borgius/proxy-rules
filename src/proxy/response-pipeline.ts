@@ -1,4 +1,5 @@
 import type http from "node:http";
+import https from "node:https";
 import httpProxy from "http-proxy";
 import type { ProxyRule } from "../plugins/types.ts";
 import type { ProxyConfig } from "../config/schema.ts";
@@ -56,7 +57,12 @@ export function runResponsePipeline(
   const startTime = Date.now();
 
   // Isolated proxy — events cannot bleed between concurrent requests.
-  const proxy = httpProxy.createProxyServer({ changeOrigin: true, secure: false });
+  // Use a no-keepalive agent so every outbound request opens a fresh TCP/TLS
+  // connection. Under Bun, the global HTTPS agent can hold stale connections
+  // that the server has already closed, causing "socket connection was closed
+  // unexpectedly" errors. Disabling keepAlive eliminates that entirely.
+  const agent = target.startsWith("https") ? new https.Agent({ keepAlive: false }) : false;
+  const proxy = httpProxy.createProxyServer({ changeOrigin: true, secure: false, agent });
 
   proxy.on("error", (err, _req, _res) => {
     logger.error("Proxy error in pipeline", { domain, error: err.message });
