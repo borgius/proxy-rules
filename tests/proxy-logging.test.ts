@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach } from "bun:test";
+import { describe, expect, test, beforeEach } from "vitest";
 import { EventEmitter } from "node:events";
 import type http from "node:http";
 import type net from "node:net";

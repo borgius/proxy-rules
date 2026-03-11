@@ -12,7 +12,7 @@
  *  3. Asserts the expected behaviour (identity passthrough vs. mutation).
  */
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import http from "node:http";
 import type net from "node:net";
 import { initLogger } from "../src/logging/logger.ts";

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { normalizeHostname, extractHostname } from "../src/plugins/plugin-registry.ts";
 
 describe("normalizeHostname", () => {

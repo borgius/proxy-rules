@@ -1,12 +1,13 @@
-import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test } from "vitest";
 import { discoverPlugins } from "../src/plugins/discover-plugins.ts";
 import { PluginRegistry } from "../src/plugins/plugin-registry.ts";
 import { initLogger } from "../src/logging/logger.ts";
-import { join } from "node:path";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
-const RULES_DIR = join(import.meta.dir, "fixtures/proxy-rules/rules");
+const RULES_DIR = join(dirname(fileURLToPath(import.meta.url)), "fixtures/proxy-rules/rules");
 const tempDirs: string[] = [];
 
 async function createTempRulesDir(): Promise<string> {
@@ -43,8 +44,8 @@ describe("discoverPlugins", () => {
     const rulesDir = await createTempRulesDir();
     const domainDir = join(rulesDir, "api.example.test");
     await mkdir(domainDir, { recursive: true });
-    await Bun.write(
-      join(domainDir, "index.ts"),
+    await writeFile(
+      join(domainDir, "index.js"),
       [
         "const rule = {",
         "  target: 'https://first.example.test',",
@@ -63,8 +64,8 @@ describe("discoverPlugins", () => {
     expect(firstLoad[0]?.rule.target).toBe("https://first.example.test");
     expect(firstLoad[0]?.rule.modifyResponseBody?.("before", {} as never)).toBe("first");
 
-    await Bun.write(
-      join(domainDir, "index.ts"),
+    await writeFile(
+      join(domainDir, "index.js"),
       [
         "const rule = {",
         "  target: 'https://second.example.test',",

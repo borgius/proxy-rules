@@ -1,4 +1,4 @@
-import { describe, expect, test, afterAll } from "bun:test";
+import { describe, expect, test, afterAll } from "vitest";
 import { ensureCa } from "../src/tls/ca-store.ts";
 import { getDomainCert } from "../src/tls/cert-generator.ts";
 import { existsSync, rmSync } from "node:fs";

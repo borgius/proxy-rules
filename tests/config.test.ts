@@ -1,12 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { loadConfig } from "../src/config/load-config.ts";
 import { parseConnectTarget, shouldInterceptConnect } from "../src/proxy/connect-handler.ts";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PluginRegistry } from "../src/plugins/plugin-registry.ts";
 
-const FIXTURES_DIR = join(import.meta.dir, "fixtures/proxy-rules");
+const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), "fixtures/proxy-rules");
 
 function createTempDir(name: string): string {
   return mkdtempSync(join(tmpdir(), `${name}-`));

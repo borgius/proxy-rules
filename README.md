@@ -1,6 +1,6 @@
 # proxy-rules
 
-A MITM-capable forward proxy with a TypeScript plugin system for per-domain request/response modification and logging. Built with Bun.
+A MITM-capable forward proxy with a JavaScript/TypeScript plugin system for per-domain request/response modification and logging. Runs on Node.js (v22+).
 
 ---
 
@@ -10,19 +10,19 @@ A MITM-capable forward proxy with a TypeScript plugin system for per-domain requ
 # Clone and install dependencies
 git clone https://github.com/borgius/proxy-rules.git
 cd proxy-rules
-bun install
+npm install
 
 # Link the CLI globally
-bun link
+npm link
 ```
 
-You can also install the published CLI from npm once Bun is available on your machine:
+You can also install the published CLI from npm:
 
 ```bash
-bun install -g proxy-rules
+npm install -g proxy-rules
 ```
 
-> `proxy-rules` executes with Bun at runtime, so make sure `bun` is installed and on your `PATH`.
+> `proxy-rules` requires **Node.js v22 or later** on your `PATH`.
 
 ---
 
@@ -97,10 +97,10 @@ my-project/
 ├── config.json          # Global config (see below)
 ├── rules/               # Per-domain plugin folders
 │   ├── example.com/
-│   │   └── index.ts     # Rule plugin for example.com
+│   │   └── index.js     # Rule plugin for example.com
 │   └── api.acme.org/
-│       ├── rewrite.ts   # Composes into a multi-module plugin
-│       └── logging.ts
+│       ├── rewrite.js   # Composes into a multi-module plugin
+│       └── logging.js
 ├── certs/               # Generated CA + per-domain leaf certs
 │   ├── ca-cert.pem
 │   ├── ca-key.pem
@@ -129,15 +129,15 @@ my-project/
 
 ## Rule plugins
 
-A rule plugin is a TypeScript file (or `index.ts` in a folder) that exports a default `ProxyRule` object. Rules for a domain are matched by normalising the requested hostname (stripping configured `ignoreSubDomains` entries like `www`) and looking up a matching folder under the active rules directory (`--rules`, `<git-root>/.proxy-rules/rules`, or `~/.proxy-rules/rules`).
+A rule plugin is a JavaScript file (or `index.js` in a folder) that exports a default `ProxyRule` object. TypeScript files are also supported when running via `vite-node` (`npm run dev`). Rules are matched by normalising the requested hostname (stripping configured `ignoreSubDomains` entries like `www`) and looking up a matching folder under the active rules directory (`--rules`, `<git-root>/.proxy-rules/rules`, or `~/.proxy-rules/rules`).
 
 ### Minimal example
 
-```typescript
-// ~/.proxy-rules/rules/example.com/index.ts
-import type { ProxyRule } from 'proxy-rules/types';
+```javascript
+// ~/.proxy-rules/rules/example.com/index.js
 
-const rule: ProxyRule = {
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
   target: 'https://example.com',
 };
 
@@ -146,10 +146,11 @@ export default rule;
 
 ### Request/response hooks
 
-```typescript
-import type { ProxyRule } from 'proxy-rules/types';
+```javascript
+// ~/.proxy-rules/rules/api.example.com/index.js
 
-const rule: ProxyRule = {
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
   target: 'https://api.example.com',
 
   onRequest(ctx) {
@@ -171,9 +172,26 @@ const rule: ProxyRule = {
 export default rule;
 ```
 
+TypeScript is also accepted if you prefer types inline:
+
+```typescript
+// ~/.proxy-rules/rules/api.example.com/index.ts  (dev / vite-node only)
+import type { ProxyRule } from 'proxy-rules/types';
+
+const rule: ProxyRule = {
+  target: 'https://api.example.com',
+
+  modifyResponseBody(body) {
+    return body.replace('hello', 'world');
+  },
+};
+
+export default rule;
+```
+
 ### Multi-module domains
 
-If a domain folder contains multiple `.ts` files, **all** exported `ProxyRule` objects are composed in filename alphabetical order. Later files can override or extend earlier ones.
+If a domain folder contains multiple `.js` (or `.ts`) files, **all** exported `ProxyRule` objects are composed in filename alphabetical order. Later files can override or extend earlier ones.
 
 ---
 

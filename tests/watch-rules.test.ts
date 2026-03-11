@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { join } from "node:path";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { initLogger } from "../src/logging/logger.ts";
 import { discoverPlugins } from "../src/plugins/discover-plugins.ts";
@@ -17,7 +17,7 @@ async function createTempRulesDir(): Promise<string> {
 }
 
 async function writeRule(filePath: string, target: string, replacement: string): Promise<void> {
-  await Bun.write(
+  await writeFile(
     filePath,
     [
       "const rule = {",
@@ -40,7 +40,7 @@ async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 
     if (await condition()) {
       return;
     }
-    await Bun.sleep(50);
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
   throw new Error(`Condition not met within ${timeoutMs}ms`);
@@ -59,7 +59,7 @@ describe("watchRules", () => {
   test("reloads a modified rule file without restarting", async () => {
     const rulesDir = await createTempRulesDir();
     const domainDir = join(rulesDir, "api.example.test");
-    const ruleFile = join(domainDir, "index.ts");
+    const ruleFile = join(domainDir, "index.js");
 
     await mkdir(domainDir, { recursive: true });
     await writeRule(ruleFile, "https://first.example.test", "first");

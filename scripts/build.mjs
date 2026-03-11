@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = resolve(rootDir, "dist");
 const cliOutputPath = resolve(distDir, "index.js");
-const cliShebang = "#!/usr/bin/env bun";
+const cliShebang = "#!/usr/bin/env node";
 
 function run(command, args) {
   const result = spawnSync(command, args, {
@@ -24,12 +24,16 @@ function run(command, args) {
 rmSync(distDir, { recursive: true, force: true });
 mkdirSync(distDir, { recursive: true });
 
-run("bun", ["build", "src/index.ts", "--target", "bun", "--outdir", "dist", "--entry-naming", "index.js"]);
-run("bun", ["build", "src/types.ts", "--target", "bun", "--outdir", "dist", "--entry-naming", "types.js"]);
-run("bun", ["run", "--bun", "tsc", "-p", "tsconfig.build.json"]);
+// Bundle with Vite (Node/ESM target, deps kept external)
+run("node", ["node_modules/.bin/vite", "build"]);
 
+// Emit TypeScript declaration files
+run("node", ["node_modules/.bin/tsc", "-p", "tsconfig.build.json"]);
+
+// Ensure shebang on CLI entry
 const cliOutput = readFileSync(cliOutputPath, "utf8");
 if (!cliOutput.startsWith(cliShebang)) {
   writeFileSync(cliOutputPath, `${cliShebang}\n${cliOutput}`);
 }
 chmodSync(cliOutputPath, 0o755);
+

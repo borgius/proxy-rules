@@ -1,7 +1,7 @@
 {
   "name": "proxy-rules",
   "version": "1.0.5",
-  "description": "MITM forward proxy with per-domain TypeScript rule plugins",
+  "description": "MITM forward proxy with per-domain TypeScript/JavaScript rule plugins",
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -13,7 +13,7 @@
   },
   "homepage": "https://github.com/borgius/proxy-rules#readme",
   "engines": {
-    "bun": ">=1.3.9"
+    "node": ">=22"
   },
   "files": [
     "bin",
@@ -32,28 +32,30 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "dev": "bun run src/index.ts",
-    "start": "bun run src/index.ts",
+    "dev": "vite-node --watch src/index.ts -- serve",
+    "start": "vite-node src/index.ts -- serve",
     "build": "node ./scripts/build.mjs",
-    "test": "bun test",
-    "typecheck": "bun run --bun tsc --noEmit",
-    "lint": "bun run --bun eslint src",
-    "prepublishOnly": "bun run test && bun run typecheck && bun run build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "prepublishOnly": "npm run test && npm run typecheck && npm run build",
     "release": "node ./scripts/release.mjs"
   },
   "dependencies": {
+    "chokidar": "^3.6.0",
+    "commander": "^12.1.0",
     "http-proxy": "^1.18.1",
     "node-forge": "^1.3.1",
-    "commander": "^12.1.0",
-    "zod": "^3.23.8",
     "picocolors": "^1.1.1",
-    "chokidar": "^3.6.0"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/http-proxy": "^1.17.15",
-    "@types/node-forge": "^1.3.11",
     "@types/node": "^22.0.0",
-    "bun-types": "^1.3.9",
-    "typescript": "^5.5.4"
+    "@types/node-forge": "^1.3.11",
+    "typescript": "^5.5.4",
+    "vite": "^7.3.1",
+    "vite-node": "^5.3.0",
+    "vitest": "^4.0.18"
   }
 }

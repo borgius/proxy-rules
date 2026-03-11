@@ -1,5 +1,6 @@
-import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
+import { copyFileSync, existsSync, readdirSync, realpathSync, statSync, unlinkSync } from "node:fs";
+import { join, basename, extname } from "node:path";
+import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import type { ProxyRule } from "./types.ts";
 import { getLogger } from "../logging/logger.ts";
@@ -12,18 +13,23 @@ export interface DiscoveredPlugin {
 /**
  * Dynamically import a single TypeScript/JavaScript module and extract its
  * default export as a ProxyRule.
+ *
+ * Cache busting strategy: copy the file to a uniquely-named temp path and
+ * import that copy. Every import hits a path the runtime has never seen, so
+ * no query-string tricks or runtime-specific cache APIs are needed. The temp
+ * file is deleted in the `finally` block so no disk waste accumulates.
  */
 async function importRule(filePath: string): Promise<ProxyRule | null> {
-  try {
-    // Bust Bun's module cache so hot-reload picks up changed rule files.
-    // Bun keys require.cache by the *realpath* (symlink-resolved), which on macOS
-    // differs from the path returned by mkdtemp/tmpdir (/var vs /private/var).
-    // query strings on file:// URLs also have no effect, so realpath deletion
-    // is the only reliable mechanism. See: https://github.com/oven-sh/bun/issues/12371
-    const realFilePath = realpathSync(filePath);
-    delete (require.cache as Record<string, unknown>)[realFilePath];
+  const realFilePath = realpathSync(filePath);
+  const ext = extname(realFilePath);
+  const tmpPath = join(
+    tmpdir(),
+    `proxy-rule-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`,
+  );
+  copyFileSync(realFilePath, tmpPath);
 
-    const mod = await import(pathToFileURL(realFilePath).href);
+  try {
+    const mod = await import(pathToFileURL(tmpPath).href);
     const rule = mod.default as ProxyRule | undefined;
     if (!rule || typeof rule !== "object") {
       getLogger().warn(`Plugin file ${filePath} has no default export — skipping`);
@@ -35,6 +41,8 @@ async function importRule(filePath: string): Promise<ProxyRule | null> {
       error: (err as Error).message,
     });
     return null;
+  } finally {
+    try { unlinkSync(tmpPath); } catch { /* best-effort cleanup */ }
   }
 }
 
