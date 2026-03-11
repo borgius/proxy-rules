@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "bun": {
+      "source": "bun.sh",
+      "sourceType": "well-known",
+      "computedHash": "3e4f4935324beffbda1dc75394b46fb30703273a59220741e5264b90129317bd"
+    },
+    "bun-init": {
+      "source": "daleseo/bun-skills",
+      "sourceType": "github",
+      "computedHash": "6894e23b1bde50cd5ab17a5af078fdb2ee77251816975f5e6c1d594e060daf8e"
+    }
+  }
+}

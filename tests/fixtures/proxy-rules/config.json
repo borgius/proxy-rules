@@ -1,0 +1,11 @@
+{
+  "port": 8080,
+  "host": "0.0.0.0",
+  "ignoreSubDomains": ["www", "m"],
+  "pluginHotReload": true,
+  "logging": {
+    "level": "info",
+    "format": "pretty",
+    "maxBodyBytes": 4096
+  }
+}
