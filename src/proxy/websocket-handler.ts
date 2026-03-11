@@ -34,7 +34,9 @@ export function handleWebSocketUpgrade(
     target = `ws://${rawHost}`;
   }
 
-  logger.info("⬌ WS upgrade", { domain, target });
+  if (rule) {
+    logger.info("⬌ WS upgrade", { domain, target });
+  }
 
   rule?.onWebSocketOpen?.(domain, req);
 
@@ -47,6 +49,8 @@ export function handleWebSocketUpgrade(
 
   socket.on("close", () => {
     rule?.onWebSocketClose?.(domain);
-    logger.debug("WS closed", { domain });
+    if (rule) {
+      logger.debug("WS closed", { domain });
+    }
   });
 }

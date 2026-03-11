@@ -313,17 +313,13 @@ export async function handleConnect(
     extractHostname(hostname),
     config.ignoreSubDomains,
   );
-
-  logger.info("⬌ CONNECT", { authority, domain });
-
-  // Fire onConnect hook if defined
   const rule = registry.resolve(hostname);
 
+  if (rule) {
+    logger.info("⬌ CONNECT", { authority, domain });
+  }
+
   if (!rule) {
-    logger.debug("No matching rule for CONNECT — using passthrough tunnel", {
-      authority,
-      domain,
-    });
     createPassthroughTunnel(clientSocket, target, head, domain);
     return;
   }

@@ -28,12 +28,13 @@ export function handleHttpRequest(
 
   const startTime = Date.now();
 
-  logger.info("→ HTTP", {
-    method: req.method,
-    url: req.url,
-    domain,
-    hasRule: !!rule,
-  });
+  if (rule) {
+    logger.info("→ HTTP", {
+      method: req.method,
+      url: req.url,
+      domain,
+    });
+  }
 
   // Determine upstream target
   let target: string;
@@ -79,14 +80,16 @@ export function handleHttpRequest(
       }
     }
 
-    const elapsed = Date.now() - startTime;
-    logger.info("← HTTP", {
-      method: req.method,
-      url: req.url,
-      domain,
-      status: proxyRes.statusCode,
-      ms: elapsed,
-    });
+    if (rule) {
+      const elapsed = Date.now() - startTime;
+      logger.info("← HTTP", {
+        method: req.method,
+        url: req.url,
+        domain,
+        status: proxyRes.statusCode,
+        ms: elapsed,
+      });
+    }
   };
 
   // Attach per-request event hooks
