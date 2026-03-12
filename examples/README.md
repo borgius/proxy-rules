@@ -1,0 +1,331 @@
+# Rule Examples
+
+Ready-to-use rule examples demonstrating the two main interception capabilities:
+
+| Capability | How to use | When the upstream is contacted |
+|---|---|---|
+| **Static response** | Return a `StaticResponse` from `onRequest` | Never — response goes straight to the client |
+| **Dynamic target** | Implement `resolveTarget` | Always — but at the URL you choose |
+
+---
+
+## Examples at a glance
+
+| Folder | What it shows |
+|---|---|
+| [`mock-api.example.com`](rules/mock-api.example.com/index.js) | Always return a hard-coded JSON body; upstream is never called |
+| [`maintenance.example.com`](rules/maintenance.example.com/index.js) | Serve a 503 HTML maintenance page unconditionally |
+| [`api.example.com`](rules/api.example.com/index.js) | Block specific paths with 403; forward everything else |
+| [`gateway.example.com`](rules/gateway.example.com/index.js) | Route requests to different backends based on URL path |
+| [`shop.example.com`](rules/shop.example.com/index.js) | A/B split — send 20 % of traffic to a canary backend |
+| [`cors.example.com`](rules/cors.example.com/index.js) | Handle `OPTIONS` preflight locally; forward real requests |
+| [`headers.example.com`](rules/headers.example.com/index.js) | Add, override, and remove **request headers** before forwarding |
+| [`payload.example.com`](rules/payload.example.com/index.js) | Parse and mutate the **request body** (JSON / form) before forwarding |
+| [`resp-headers.example.com`](rules/resp-headers.example.com/index.js) | Inject security headers and rewrite **response headers** |
+| [`resp-body.example.com`](rules/resp-body.example.com/index.js) | Rewrite **response body** — JSON, HTML, plain text, and JS |
+
+---
+
+## Static response — returning from `onRequest`
+
+Return a [`StaticResponse`](../../src/plugins/types.ts) object from `onRequest` to short-circuit the proxy. The upstream is **never contacted**.
+
+```javascript
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  onRequest(ctx) {
+    // Any truthy return value is treated as a StaticResponse.
+    return {
+      status: 200,                          // default: 200
+      contentType: "application/json",      // shorthand for Content-Type header
+      headers: { "X-Mocked-By": "proxy-rules" },
+      body: JSON.stringify({ ok: true }),
+    };
+  },
+};
+
+export default rule;
+```
+
+**Selective interception** — return `undefined` (or nothing) to forward the request normally:
+
+```javascript
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  target: "https://api.example.com",
+
+  onRequest(ctx) {
+    if (ctx.req.method === "OPTIONS") {
+      // Short-circuit OPTIONS preflight
+      return { status: 204, headers: { "Access-Control-Allow-Origin": "*" } };
+    }
+    // All other methods are forwarded.
+    ctx.proxyReq.setHeader("X-Request-Id", crypto.randomUUID());
+  },
+};
+```
+
+### `StaticResponse` fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `status` | `number` | `200` | HTTP status code |
+| `headers` | `Record<string,string>` | `{}` | Additional response headers |
+| `body` | `string \| Buffer` | `""` | Response body |
+| `contentType` | `string` | — | Shorthand for `Content-Type`; ignored when `headers['content-type']` is already set |
+
+---
+
+## Dynamic target — `resolveTarget`
+
+Implement `resolveTarget` to pick the upstream URL on a per-request basis. It runs **before** the connection to the upstream is opened.
+
+```javascript
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  // Fallback when resolveTarget returns undefined.
+  target: "https://api.example.com",
+
+  /**
+   * @param {import('node:http').IncomingMessage} req
+   * @param {string} domain
+   * @returns {string | undefined}
+   */
+  resolveTarget(req, domain) {
+    // Route /v2 paths to a different backend.
+    if (req.url?.startsWith("/v2")) {
+      return "https://v2.api.internal";
+    }
+    // Return undefined → use the static `target` above.
+  },
+};
+```
+
+`resolveTarget` can also be **`async`** for cases that require a database or service-discovery lookup:
+
+```javascript
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  async resolveTarget(req) {
+    const tenant = req.headers["x-tenant-id"];
+    const backend = await lookupBackend(tenant); // async DB / cache call
+    return backend ?? "https://default.api.internal";
+  },
+};
+```
+
+### Combining both capabilities
+
+You can use `resolveTarget` and a selective static response together in the same rule:
+
+```javascript
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  target: "https://api.example.com",
+
+  resolveTarget(req) {
+    // Route by path — the chosen target is used unless onRequest intercepts.
+    return req.url?.startsWith("/legacy") ? "https://legacy.api.internal" : undefined;
+  },
+
+  onRequest(ctx) {
+    // Block deprecated endpoint regardless of which backend was chosen.
+    if (ctx.url.includes("/deprecated")) {
+      return { status: 410, body: "Gone", contentType: "text/plain" };
+    }
+    ctx.proxyReq.setHeader("X-Via", "proxy-rules");
+  },
+};
+```
+
+---
+
+## Request header manipulation — `onRequest`
+
+All header operations go through `ctx.proxyReq` (a `http.ClientRequest`).
+Return value is ignored here — return nothing and the request is forwarded.
+
+```javascript
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  target: 'https://api.example.com',
+
+  onRequest(ctx) {
+    const { proxyReq, req } = ctx;
+
+    // Add a new header
+    proxyReq.setHeader('X-Internal-Token', process.env.INTERNAL_TOKEN);
+
+    // Override an existing header
+    proxyReq.setHeader('User-Agent', 'my-service/1.0');
+
+    // Remove a header — stops it reaching the upstream
+    proxyReq.removeHeader('Cookie');
+    proxyReq.removeHeader('Referer');
+
+    // Forward real client IP
+    proxyReq.setHeader('X-Forwarded-For', req.socket.remoteAddress ?? '');
+  },
+};
+```
+
+See the full example in [`headers.example.com`](rules/headers.example.com/index.js).
+
+---
+
+## Request body (payload) modification — `onRequest`
+
+Modifying the request body requires three steps:
+
+1. **Override `req.pipe`** with a no-op so http-proxy does not also stream the original body.
+2. **Accumulate chunks** from `req` yourself.
+3. **Write the modified buffer** to `proxyReq` and call `proxyReq.end()`.
+
+```javascript
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  target: 'https://api.example.com',
+
+  onRequest(ctx) {
+    const { req, proxyReq } = ctx;
+
+    if (!['POST', 'PUT', 'PATCH'].includes(req.method ?? '')) return;
+
+    const chunks = [];
+
+    // Step 1 — prevent http-proxy from piping the original body
+    req.pipe = () => req;
+
+    // Step 2 — buffer incoming body
+    req.on('data', chunk => chunks.push(Buffer.from(chunk)));
+
+    req.on('end', () => {
+      let body = Buffer.concat(chunks).toString('utf-8');
+
+      // Step 3 — mutate and forward
+      try {
+        const json = JSON.parse(body);
+        json._proxyTimestamp = Date.now();   // inject
+        delete json.internalDebugFlag;       // strip
+        body = JSON.stringify(json);
+        proxyReq.setHeader('Content-Type', 'application/json');
+      } catch { /* not JSON — forward as-is */ }
+
+      const buf = Buffer.from(body, 'utf-8');
+      proxyReq.setHeader('Content-Length', buf.length);
+      proxyReq.end(buf);
+    });
+  },
+};
+```
+
+> **Note** Overriding `req.pipe` is necessary because http-proxy calls
+> `req.pipe(proxyReq)` after the `onRequest` hook returns. Without the
+> override, the original body would also be streamed, writing data twice.
+
+See the full example (JSON + URL-encoded forms) in [`payload.example.com`](rules/payload.example.com/index.js).
+
+---
+
+## Response header manipulation — `onResponse`
+
+`onResponse` fires when the upstream response headers arrive (before the body
+streams to the client). Mutate `ctx.proxyRes.headers` in place.
+
+```javascript
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  target: 'https://api.example.com',
+
+  onResponse(ctx) {
+    const { proxyRes } = ctx;
+
+    // Inject security headers
+    proxyRes.headers['strict-transport-security'] = 'max-age=31536000';
+    proxyRes.headers['x-content-type-options']    = 'nosniff';
+    proxyRes.headers['x-frame-options']            = 'DENY';
+
+    // Override a specific header value
+    proxyRes.headers['cache-control'] = 'no-store';
+
+    // Remove headers that expose internal stack details
+    delete proxyRes.headers['server'];
+    delete proxyRes.headers['x-powered-by'];
+  },
+};
+```
+
+See the full example (CORS rewriting, TTL shortening, infrastructure header scrubbing) in [`resp-headers.example.com`](rules/resp-headers.example.com/index.js).
+
+---
+
+## Response body modification — `modifyResponseBody`
+
+`modifyResponseBody` receives the fully-buffered response body as a string.
+Return the modified string, or `undefined` to leave it unchanged.
+
+The proxy only calls this hook for **text-like** responses
+(`text/*`, `application/json`, `application/xml`, `application/javascript`)
+whose size is ≤ `config.logging.maxBodyBytes`.
+
+```javascript
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  target: 'https://api.example.com',
+
+  modifyResponseBody(body, ctx) {
+    if (!ctx.contentType?.includes('application/json')) return undefined;
+
+    let json;
+    try { json = JSON.parse(body); }
+    catch { return undefined; }  // invalid JSON — leave unchanged
+
+    // Inject a field
+    json._proxied = true;
+
+    // Mask a sensitive value
+    if (json.user?.ssn) {
+      json.user.ssn = '***-**-' + String(json.user.ssn).slice(-4);
+    }
+
+    return JSON.stringify(json);
+  },
+};
+```
+
+You can also use `onResponse` alongside `modifyResponseBody` in the same rule —
+`onResponse` runs first (letting you rewrite headers), then the body hook fires:
+
+```javascript
+const rule = {
+  onResponse(ctx) {
+    // Runs first — modify headers
+    delete ctx.proxyRes.headers['x-internal-trace-id'];
+  },
+
+  modifyResponseBody(body, ctx) {
+    // Runs second — modify body
+    return body.replace(/staging\.example\.com/g, 'example.com');
+  },
+};
+```
+
+See the full example (JSON masking, HTML injection, JS feature-flag patching) in [`resp-body.example.com`](rules/resp-body.example.com/index.js).
+
+---
+
+## Usage
+
+Copy any example folder into your active rules directory:
+
+```bash
+cp -r examples/rules/mock-api.example.com ~/.proxy-rules/rules/
+```
+
+Then start (or hot-reload) the proxy:
+
+```bash
+proxy-rules serve
+```
+
+Because hot-reload is enabled by default, changes to rule files take effect immediately without restarting.

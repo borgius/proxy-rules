@@ -1,7 +1,7 @@
 import type http from "node:http";
 import https from "node:https";
 import httpProxy from "http-proxy";
-import type { ProxyRule } from "../plugins/types.ts";
+import type { ProxyRule, StaticResponse } from "../plugins/types.ts";
 import type { ProxyConfig } from "../config/schema.ts";
 import type { Logger } from "../logging/logger.ts";
 
@@ -80,7 +80,20 @@ export function runResponsePipeline(
     if (rule.onRequest) {
       void (async () => {
         try {
-          await rule.onRequest!({ req, proxyReq, res, domain, url: req.url ?? "" });
+          const result = await rule.onRequest!({ req, proxyReq, res, domain, url: req.url ?? "" });
+          if (result != null) {
+            // Static response — abort upstream and reply directly.
+            const { status = 200, headers = {}, body = "", contentType } = result as StaticResponse;
+            const responseHeaders: http.OutgoingHttpHeaders = { ...headers };
+            if (contentType && !responseHeaders["content-type"]) {
+              responseHeaders["content-type"] = contentType;
+            }
+            if (!res.headersSent) {
+              res.writeHead(status, responseHeaders);
+              res.end(body);
+            }
+            proxyReq.destroy();
+          }
         } catch (err) {
           logger.error("onRequest hook error", { domain, error: (err as Error).message });
         }

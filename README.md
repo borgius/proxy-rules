@@ -172,26 +172,101 @@ const rule = {
 export default rule;
 ```
 
-TypeScript is also accepted if you prefer types inline:
+### Returning a static response (short-circuit)
 
-```typescript
-// ~/.proxy-rules/rules/api.example.com/index.ts  (dev / vite-node only)
-import type { ProxyRule } from 'proxy-rules/types';
+Return a `StaticResponse` object from `onRequest` to answer the client immediately without forwarding the request to the upstream at all.
 
-const rule: ProxyRule = {
+```javascript
+// ~/.proxy-rules/rules/api.example.com/index.js
+
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
   target: 'https://api.example.com',
 
-  modifyResponseBody(body) {
-    return body.replace('hello', 'world');
+  onRequest(ctx) {
+    // Block /admin paths — upstream is never contacted.
+    if (ctx.url.includes('/admin')) {
+      return {
+        status: 403,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'Forbidden' }),
+      };
+    }
+
+    // No return value → request is forwarded normally.
+    ctx.proxyReq.setHeader('X-Forwarded-Via', 'proxy-rules');
   },
 };
 
 export default rule;
 ```
 
+When `onRequest` returns nothing (or `undefined`), the request is forwarded as usual.
+
+#### `StaticResponse` fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `status` | `number` | `200` | HTTP status code |
+| `headers` | `Record<string, string>` | `{}` | Additional response headers |
+| `body` | `string \| Buffer` | `""` | Response body |
+| `contentType` | `string` | — | Shorthand for `Content-Type`; ignored when `headers['content-type']` is already set |
+
+### Dynamic upstream target
+
+Implement `resolveTarget` to choose the upstream URL per-request. It runs **before** the connection is opened, so the chosen URL is used for the actual TCP/TLS handshake.
+
+```javascript
+// ~/.proxy-rules/rules/gateway.example.com/index.js
+
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  // Fallback when resolveTarget returns undefined.
+  target: 'https://api.example.com',
+
+  /**
+   * @param {import('node:http').IncomingMessage} req
+   * @param {string} domain
+   * @returns {string | undefined}
+   */
+  resolveTarget(req, domain) {
+    // Route /v2 paths to a separate backend.
+    if (req.url?.startsWith('/v2')) {
+      return 'https://v2.api.internal';
+    }
+    // Return undefined → keep the static `target` above.
+  },
+};
+
+export default rule;
+```
+
+`resolveTarget` may also be `async` for database/service-discovery lookups.
+
 ### Multi-module domains
 
 If a domain folder contains multiple `.js` (or `.ts`) files, **all** exported `ProxyRule` objects are composed in filename alphabetical order. Later files can override or extend earlier ones.
+
+---
+
+## Examples
+
+The [`examples/`](examples/) directory contains ready-to-use rules covering the most common patterns:
+
+| Example | What it shows |
+|---|---|
+| [`mock-api.example.com`](examples/rules/mock-api.example.com/index.js) | Full static mock — upstream never called |
+| [`maintenance.example.com`](examples/rules/maintenance.example.com/index.js) | 503 maintenance page |
+| [`api.example.com`](examples/rules/api.example.com/index.js) | Selective 403 block + header injection |
+| [`gateway.example.com`](examples/rules/gateway.example.com/index.js) | Path-based routing to different backends |
+| [`shop.example.com`](examples/rules/shop.example.com/index.js) | A/B canary traffic splitting |
+| [`cors.example.com`](examples/rules/cors.example.com/index.js) | Local OPTIONS preflight handler |
+| [`headers.example.com`](examples/rules/headers.example.com/index.js) | Add, override, and remove **request headers** |
+| [`payload.example.com`](examples/rules/payload.example.com/index.js) | Mutate **request body** (JSON / form) before forwarding |
+| [`resp-headers.example.com`](examples/rules/resp-headers.example.com/index.js) | Inject security headers and rewrite **response headers** |
+| [`resp-body.example.com`](examples/rules/resp-body.example.com/index.js) | Rewrite **response body** — JSON, HTML, plain text, JS |
+
+See [`examples/README.md`](examples/README.md) for detailed explanations and copy-paste instructions.
 
 ---
 
