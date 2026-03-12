@@ -6,6 +6,7 @@ import { getLogger } from "../logging/logger.ts";
 import type { ProxyConfig } from "../config/schema.ts";
 import type { CaAssets } from "../tls/ca-store.ts";
 import type { StaticResponse } from "../plugins/types.ts";
+import { createContextHelpers } from "../plugins/context-helpers.ts";
 import { runResponsePipeline, bufferIncomingBody } from "./response-pipeline.ts";
 
 function sendStaticResponse(res: http.ServerResponse, sr: StaticResponse): void {
@@ -170,7 +171,7 @@ export async function handleHttpRequest(
   const onProxyRes = async (proxyRes: http.IncomingMessage) => {
     if (rule?.onResponse) {
       try {
-        await rule.onResponse({ req, proxyRes, res, domain });
+        await rule.onResponse({ req, proxyRes, res, domain, helpers: createContextHelpers() });
       } catch (err) {
         logger.error("onResponse hook error", {
           domain,

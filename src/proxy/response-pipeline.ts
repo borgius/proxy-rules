@@ -2,6 +2,7 @@ import type http from "node:http";
 import https from "node:https";
 import httpProxy from "http-proxy";
 import type { ProxyRule, StaticResponse } from "../plugins/types.ts";
+import { createContextHelpers } from "../plugins/context-helpers.ts";
 import type { ProxyConfig } from "../config/schema.ts";
 import type { Logger } from "../logging/logger.ts";
 
@@ -87,6 +88,12 @@ export function runResponsePipeline(
   preBufferedRequestBody: Buffer | null = null,
 ): void {
   const startTime = Date.now();
+
+  // Attach the pre-buffered request body so toCurl can read it without an
+  // explicit `bodies` argument.
+  if (preBufferedRequestBody !== null) {
+    (req as http.IncomingMessage & { _body?: string })._body = preBufferedRequestBody.toString("utf-8");
+  }
 
   // Isolated proxy — events cannot bleed between concurrent requests.
   // Use a no-keepalive agent so every outbound request opens a fresh TCP/TLS
@@ -223,6 +230,8 @@ export function runResponsePipeline(
       if (fellBackToPassthrough || chunks.length === 0) return;
 
       const body = Buffer.concat(chunks).toString("utf-8");
+      // Attach so toCurl(req, proxyRes) picks it up automatically.
+      (proxyRes as http.IncomingMessage & { _body?: string })._body = body;
       let modified: string | undefined;
 
       try {
@@ -232,6 +241,7 @@ export function runResponsePipeline(
           res,
           domain,
           contentType,
+          helpers: createContextHelpers(),
         });
       } catch (err) {
         logger.error("modifyResponseBody error", {
@@ -243,7 +253,7 @@ export function runResponsePipeline(
       // Run optional onResponse hook before we write the (possibly mutated) response.
       if (rule.onResponse) {
         try {
-          await rule.onResponse({ req, proxyRes, res, domain });
+          await rule.onResponse({ req, proxyRes, res, domain, helpers: createContextHelpers() });
         } catch (err) {
           logger.error("onResponse hook error", { domain, error: (err as Error).message });
         }

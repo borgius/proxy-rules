@@ -31,6 +31,57 @@ export interface StaticResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Shared helper utilities injected into response contexts
+// ---------------------------------------------------------------------------
+
+export interface ContextHelpers {
+  /**
+   * Converts a request to a `curl -v` command string.
+   * When `res` is supplied the output also shows response headers in `curl -v` style (`>` / `<` lines).
+   * Bodies are read automatically from `_body` properties set on the objects by the pipeline:
+   * - JSON bodies are pretty-printed; text bodies are printed as-is; binary bodies are base64-encoded.
+   * - Text and base64 output is truncated at 200 lines.
+   *
+   * @example
+   * console.log(ctx.helpers.toCurl(ctx.req));
+   * // verbose with response headers + bodies (bodies included automatically in modifyResponseBody)
+   * console.log(ctx.helpers.toCurl(ctx.req, ctx.proxyRes));
+   */
+  toCurl(
+    req: http.IncomingMessage,
+    res?: http.IncomingMessage | http.ServerResponse,
+  ): string;
+
+  /**
+   * Converts a request to a fetch-compatible `{ url, options }` pair.
+   *
+   * @example
+   * const { url, options } = ctx.helpers.toFetch(ctx.req);
+   * const resp = await fetch(url, options);
+   */
+  toFetch(req: http.IncomingMessage): { url: string; options: { method: string; headers: Record<string, string> } };
+
+  /**
+   * Serialises a request or response to a plain JSON-friendly object.
+   *
+   * @example
+   * console.log(JSON.stringify(ctx.helpers.toJson(ctx.req), null, 2));
+   * console.log(JSON.stringify(ctx.helpers.toJson(ctx.proxyRes), null, 2));
+   */
+  toJson(reqOrRes: http.IncomingMessage | http.ServerResponse): Record<string, unknown>;
+
+  /**
+   * Saves `data` to `filePath`. Strings are written as-is; objects are JSON-pretty-printed (2 spaces).
+   * Parent directories are created automatically.
+   *
+   * @example
+   * await ctx.helpers.saveTo('/tmp/debug/req.json', ctx.helpers.toJson(ctx.req));
+   * await ctx.helpers.saveTo('/tmp/debug/response.txt', ctx.helpers.toCurl(ctx.req, ctx.proxyRes));
+   */
+  saveTo(filePath: string, data: string | object): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
 // Contexts passed into plugin hooks
 // ---------------------------------------------------------------------------
 
@@ -56,6 +107,8 @@ export interface ResponseContext {
   res: http.ServerResponse;
   /** Normalised domain. */
   domain: string;
+  /** Utility helpers for inspecting and saving requests/responses. */
+  helpers: ContextHelpers;
 }
 
 export interface BodyContext extends ResponseContext {

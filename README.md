@@ -172,6 +172,50 @@ const rule = {
 export default rule;
 ```
 
+### Context helpers
+
+`ResponseContext` (available in `onResponse` and `modifyResponseBody`) exposes a `helpers` object with four utility methods for debugging and inspection:
+
+| Method | Description |
+|---|---|
+| `helpers.toCurl(req)` | Returns a ready-to-run `curl -v` command for the request |
+| `helpers.toCurl(req, proxyRes)` | Same, plus `curl -v`-style `> request` / `< response` header trace. When bodies are stored on the objects (set automatically by the pipeline), they are included. JSON is pretty-printed, text is raw, binary is base64. Output is truncated at 200 lines. |
+| `helpers.toFetch(req)` | Returns `{ url, options }` ready to pass to `fetch()` |
+| `helpers.toJson(req\|res)` | Serialises a request or response to a plain JSON-able object |
+| `helpers.saveTo(path, data)` | Writes a string or object (pretty-printed JSON) to a file; creates parent dirs |
+
+```javascript
+// ~/.proxy-rules/rules/api.example.com/index.js
+
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  target: 'https://api.example.com',
+
+  async onResponse(ctx) {
+    // Dump the raw curl command to reproduce this request from a terminal
+    console.log(ctx.helpers.toCurl(ctx.req));
+
+    // Log the full verbose trace (request + response headers)
+    console.log(ctx.helpers.toCurl(ctx.req, ctx.proxyRes));
+
+    // Save a JSON snapshot of the response for offline inspection
+    await ctx.helpers.saveTo('/tmp/debug/response.json', ctx.helpers.toJson(ctx.proxyRes));
+  },
+
+  async modifyResponseBody(body, ctx) {
+    // Full verbose trace — request and response bodies are attached automatically
+    // by the pipeline, so no need to pass them explicitly
+    console.log(ctx.helpers.toCurl(ctx.req, ctx.proxyRes));
+
+    // ctx also has helpers (via BodyContext → ResponseContext)
+    await ctx.helpers.saveTo('/tmp/debug/body.json', ctx.helpers.toJson(ctx.req));
+    return body;
+  },
+};
+
+export default rule;
+```
+
 ### Returning a static response (short-circuit)
 
 Return a `StaticResponse` object from `onRequest` to answer the client immediately without forwarding the request to the upstream at all.
