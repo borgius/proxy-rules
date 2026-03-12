@@ -18,7 +18,7 @@ function makeIncomingReq(overrides: Partial<{
   statusCode: number;
   statusMessage: string;
 }> = {}): http.IncomingMessage {
-  const req = new http.IncomingMessage(new createServer().listen(0) as never);
+  const req = new http.IncomingMessage(createServer().listen(0) as never);
   req.method = overrides.method ?? "GET";
   req.url = overrides.url ?? "/path?q=1";
   req.headers = {
@@ -38,7 +38,7 @@ function makeIncomingRes(overrides: Partial<{
   headers: http.IncomingHttpHeaders;
   httpVersion: string;
 }> = {}): http.IncomingMessage {
-  const res = new http.IncomingMessage(new createServer().listen(0) as never);
+  const res = new http.IncomingMessage(createServer().listen(0) as never);
   res.statusCode = overrides.statusCode ?? 200;
   res.statusMessage = overrides.statusMessage ?? "OK";
   res.httpVersion = overrides.httpVersion ?? "1.1";
