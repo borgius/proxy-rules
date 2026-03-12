@@ -212,6 +212,36 @@ When `onRequest` returns nothing (or `undefined`), the request is forwarded as u
 | `body` | `string \| Buffer` | `""` | Response body |
 | `contentType` | `string` | — | Shorthand for `Content-Type`; ignored when `headers['content-type']` is already set |
 
+### Modifying the request body
+
+`modifyRequestBody` mirrors `modifyResponseBody` for outgoing requests. Receive the full buffered body as a string and return the modified version (or `undefined` to leave it unchanged). Works for POST / PUT / PATCH requests whose size is ≤ `maxBodyBytes`. The proxy handles all buffering and re-sending.
+
+```javascript
+// ~/.proxy-rules/rules/api.example.com/index.js
+
+/** @type {import('proxy-rules/types').ProxyRule} */
+const rule = {
+  target: 'https://api.example.com',
+
+  /**
+   * @param {string} body
+   * @param {import('proxy-rules/types').RequestBodyContext} ctx
+   */
+  modifyRequestBody(body, ctx) {
+    if (!ctx.contentType?.includes('application/json')) return undefined;
+
+    const json = JSON.parse(body);
+    json._env = 'intercepted';
+    delete json.clientSecret;
+    return JSON.stringify(json);
+  },
+};
+
+export default rule;
+```
+
+`modifyRequestBody` and `modifyResponseBody` can coexist in the same rule — the proxy runs both.
+
 ### Dynamic upstream target
 
 Implement `resolveTarget` to choose the upstream URL per-request. It runs **before** the connection is opened, so the chosen URL is used for the actual TCP/TLS handshake.
@@ -262,7 +292,7 @@ The [`examples/`](examples/) directory contains ready-to-use rules covering the 
 | [`shop.example.com`](examples/rules/shop.example.com/index.js) | A/B canary traffic splitting |
 | [`cors.example.com`](examples/rules/cors.example.com/index.js) | Local OPTIONS preflight handler |
 | [`headers.example.com`](examples/rules/headers.example.com/index.js) | Add, override, and remove **request headers** |
-| [`payload.example.com`](examples/rules/payload.example.com/index.js) | Mutate **request body** (JSON / form) before forwarding |
+| [`payload.example.com`](examples/rules/payload.example.com/index.js) | Mutate **request body** (JSON / form) via `modifyRequestBody` |
 | [`resp-headers.example.com`](examples/rules/resp-headers.example.com/index.js) | Inject security headers and rewrite **response headers** |
 | [`resp-body.example.com`](examples/rules/resp-body.example.com/index.js) | Rewrite **response body** — JSON, HTML, plain text, JS |
 

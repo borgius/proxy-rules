@@ -34,6 +34,37 @@ function buildMutatedResponseHeaders(headers: http.IncomingHttpHeaders, body: st
 }
 
 /**
+ * Buffer the full body of an incoming request stream up to `maxBytes`.
+ * Returns the buffer, or `null` when the body exceeds the limit.
+ * The stream is fully drained in either case so the socket stays healthy.
+ */
+export function bufferIncomingBody(
+  req: http.IncomingMessage,
+  maxBytes: number,
+): Promise<Buffer | null> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let overLimit = false;
+
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (!overLimit) {
+        if (size <= maxBytes) {
+          chunks.push(chunk);
+        } else {
+          overLimit = true;
+          chunks.length = 0; // release memory — we won't use these
+        }
+      }
+    });
+
+    req.on("end", () => resolve(overLimit ? null : Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+/**
  * Run the selfHandleResponse pipeline used when a rule declares `modifyResponseBody`.
  * Buffers the upstream response body (up to maxBodyBytes), calls the modifier,
  * then writes the result to the client.
@@ -53,6 +84,7 @@ export function runResponsePipeline(
   domain: string,
   config: ProxyConfig,
   logger: Logger,
+  preBufferedRequestBody: Buffer | null = null,
 ): void {
   const startTime = Date.now();
 
@@ -74,15 +106,15 @@ export function runResponsePipeline(
 
   // Inject accept-encoding: identity so the upstream never gzip-encodes the body
   // (we can't decode compressed streams, so we'd be forced to passthrough unchanged).
-  // Also run the optional onRequest hook from the rule.
+  // Also run the optional onRequest hook and modifyRequestBody from the rule.
   proxy.once("proxyReq", (proxyReq: http.ClientRequest) => {
     proxyReq.setHeader("accept-encoding", "identity");
-    if (rule.onRequest) {
-      void (async () => {
-        try {
-          const result = await rule.onRequest!({ req, proxyReq, res, domain, url: req.url ?? "" });
+    void (async () => {
+      try {
+        // onRequest — may return a StaticResponse.
+        if (rule.onRequest) {
+          const result = await rule.onRequest({ req, proxyReq, res, domain, url: req.url ?? "" });
           if (result != null) {
-            // Static response — abort upstream and reply directly.
             const { status = 200, headers = {}, body = "", contentType } = result as StaticResponse;
             const responseHeaders: http.OutgoingHttpHeaders = { ...headers };
             if (contentType && !responseHeaders["content-type"]) {
@@ -93,12 +125,42 @@ export function runResponsePipeline(
               res.end(body);
             }
             proxyReq.destroy();
+            return;
           }
-        } catch (err) {
-          logger.error("onRequest hook error", { domain, error: (err as Error).message });
         }
-      })();
-    }
+
+        // modifyRequestBody — write pre-buffered (and possibly modified) body.
+        if (preBufferedRequestBody !== null) {
+          const contentType = Array.isArray(req.headers["content-type"])
+            ? req.headers["content-type"][0]
+            : req.headers["content-type"];
+          const raw = preBufferedRequestBody.toString("utf-8");
+          let modified: string | undefined;
+
+          if (rule.modifyRequestBody) {
+            try {
+              modified = await rule.modifyRequestBody(raw, {
+                req,
+                proxyReq,
+                res,
+                domain,
+                url: req.url ?? "",
+                contentType,
+              });
+            } catch (err) {
+              logger.error("modifyRequestBody error", { domain, error: (err as Error).message });
+            }
+          }
+
+          const buf = modified !== undefined ? Buffer.from(modified, "utf-8") : preBufferedRequestBody;
+          proxyReq.setHeader("content-length", buf.length);
+          proxyReq.removeHeader("transfer-encoding");
+          proxyReq.end(buf);
+        }
+      } catch (err) {
+        logger.error("onRequest hook error", { domain, error: (err as Error).message });
+      }
+    })();
   });
 
   // config.logging.maxBodyBytes is 0 when body logging is disabled.

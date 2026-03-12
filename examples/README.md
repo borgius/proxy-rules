@@ -20,7 +20,7 @@ Ready-to-use rule examples demonstrating the two main interception capabilities:
 | [`shop.example.com`](rules/shop.example.com/index.js) | A/B split — send 20 % of traffic to a canary backend |
 | [`cors.example.com`](rules/cors.example.com/index.js) | Handle `OPTIONS` preflight locally; forward real requests |
 | [`headers.example.com`](rules/headers.example.com/index.js) | Add, override, and remove **request headers** before forwarding |
-| [`payload.example.com`](rules/payload.example.com/index.js) | Parse and mutate the **request body** (JSON / form) before forwarding |
+| [`payload.example.com`](rules/payload.example.com/index.js) | Mutate **request body** (JSON / form) via `modifyRequestBody` |
 | [`resp-headers.example.com`](rules/resp-headers.example.com/index.js) | Inject security headers and rewrite **response headers** |
 | [`resp-body.example.com`](rules/resp-body.example.com/index.js) | Rewrite **response body** — JSON, HTML, plain text, and JS |
 
@@ -173,55 +173,57 @@ See the full example in [`headers.example.com`](rules/headers.example.com/index.
 
 ---
 
-## Request body (payload) modification — `onRequest`
+## Request body (payload) modification — `modifyRequestBody`
 
-Modifying the request body requires three steps:
+`modifyRequestBody` mirrors `modifyResponseBody` for the request side. Receive the full buffered body as a string, return the modified version (or `undefined` to leave it unchanged). Works for POST / PUT / PATCH requests whose size is ≤ `maxBodyBytes`.
 
-1. **Override `req.pipe`** with a no-op so http-proxy does not also stream the original body.
-2. **Accumulate chunks** from `req` yourself.
-3. **Write the modified buffer** to `proxyReq` and call `proxyReq.end()`.
+The proxy handles all buffering and re-sending — no `req.pipe` tricks needed.
 
 ```javascript
 /** @type {import('proxy-rules/types').ProxyRule} */
 const rule = {
   target: 'https://api.example.com',
 
-  onRequest(ctx) {
-    const { req, proxyReq } = ctx;
+  /**
+   * @param {string} body
+   * @param {import('proxy-rules/types').RequestBodyContext} ctx
+   */
+  modifyRequestBody(body, ctx) {
+    if (!ctx.contentType?.includes('application/json')) return undefined;
 
-    if (!['POST', 'PUT', 'PATCH'].includes(req.method ?? '')) return;
+    let json;
+    try { json = JSON.parse(body); }
+    catch { return undefined; }  // invalid JSON — leave unchanged
 
-    const chunks = [];
+    // Inject, strip, rename as needed.
+    json._proxyTimestamp = Date.now();
+    delete json.internalDebugFlag;
 
-    // Step 1 — prevent http-proxy from piping the original body
-    req.pipe = () => req;
-
-    // Step 2 — buffer incoming body
-    req.on('data', chunk => chunks.push(Buffer.from(chunk)));
-
-    req.on('end', () => {
-      let body = Buffer.concat(chunks).toString('utf-8');
-
-      // Step 3 — mutate and forward
-      try {
-        const json = JSON.parse(body);
-        json._proxyTimestamp = Date.now();   // inject
-        delete json.internalDebugFlag;       // strip
-        body = JSON.stringify(json);
-        proxyReq.setHeader('Content-Type', 'application/json');
-      } catch { /* not JSON — forward as-is */ }
-
-      const buf = Buffer.from(body, 'utf-8');
-      proxyReq.setHeader('Content-Length', buf.length);
-      proxyReq.end(buf);
-    });
+    return JSON.stringify(json);
   },
 };
 ```
 
-> **Note** Overriding `req.pipe` is necessary because http-proxy calls
-> `req.pipe(proxyReq)` after the `onRequest` hook returns. Without the
-> override, the original body would also be streamed, writing data twice.
+You can use `modifyRequestBody` and `modifyResponseBody` together in the same rule:
+
+```javascript
+const rule = {
+  modifyRequestBody(body, ctx) {
+    // Rewrite the outgoing request body
+    return body.replace('staging', 'production');
+  },
+
+  modifyResponseBody(body, ctx) {
+    // Rewrite the incoming response body
+    return body.replace('internal-host', 'api.example.com');
+  },
+};
+```
+
+> **Note** If you need low-level control (e.g. manipulating raw bytes, form data, or non-UTF-8 content),
+> you can still implement the manual pattern in `onRequest` — see the source of
+> [`payload.example.com`](rules/payload.example.com/index.js) for the old approach as a reference,
+> or look at the JSDoc on `onRequest`.
 
 See the full example (JSON + URL-encoded forms) in [`payload.example.com`](rules/payload.example.com/index.js).
 

@@ -63,6 +63,21 @@ export interface BodyContext extends ResponseContext {
   contentType: string | undefined;
 }
 
+export interface RequestBodyContext {
+  /** The original client request. */
+  req: http.IncomingMessage;
+  /** The outgoing proxy request that will be sent to the upstream. */
+  proxyReq: http.ClientRequest;
+  /** The response object for the client connection. */
+  res: http.ServerResponse;
+  /** Normalised domain. */
+  domain: string;
+  /** Full requested URL from the client, e.g. http://example.com/path */
+  url: string;
+  /** Content-Type of the incoming request body, if present. */
+  contentType: string | undefined;
+}
+
 export interface ConnectContext {
   /** Raw TCP socket from the client. */
   socket: net.Socket;
@@ -122,6 +137,23 @@ export interface ProxyRule {
    * }
    */
   onRequest?: (ctx: RequestContext) => void | StaticResponse | Promise<void | StaticResponse>;
+
+  /**
+   * Called with the complete request body before it is forwarded to the upstream.
+   * Works for requests carrying a body (POST / PUT / PATCH) whose size is ≤ `maxBodyBytes`.
+   *
+   * Return the (modified) body string, or `undefined` to forward the original body unchanged.
+   * The proxy handles buffering and re-sending — you do not need to manage `req.pipe` or
+   * `proxyReq.end()` yourself.
+   *
+   * @example
+   * modifyRequestBody(body, ctx) {
+   *   const json = JSON.parse(body);
+   *   delete json.internalDebugFlag;
+   *   return JSON.stringify(json);
+   * }
+   */
+  modifyRequestBody?: (body: string, ctx: RequestBodyContext) => string | undefined | Promise<string | undefined>;
 
   /**
    * Called when the upstream response arrives (headers available, body streaming).

@@ -6,7 +6,7 @@ import { getLogger } from "../logging/logger.ts";
 import type { ProxyConfig } from "../config/schema.ts";
 import type { CaAssets } from "../tls/ca-store.ts";
 import type { StaticResponse } from "../plugins/types.ts";
-import { runResponsePipeline } from "./response-pipeline.ts";
+import { runResponsePipeline, bufferIncomingBody } from "./response-pipeline.ts";
 
 function sendStaticResponse(res: http.ServerResponse, sr: StaticResponse): void {
   const { status = 200, headers = {}, body = "", contentType } = sr;
@@ -76,11 +76,33 @@ export async function handleHttpRequest(
   // Tag request with resolved target (for error handler)
   (req as http.IncomingMessage & { proxyTarget?: string }).proxyTarget = target;
 
+  // Use the same byte cap as the response-body modifier.
+  const loggingMaxBytes = config.logging.maxBodyBytes;
+  const modifyMaxBytes = loggingMaxBytes > 0 ? loggingMaxBytes : 10 * 1024 * 1024;
+
+  // Pre-buffer the request body when the rule declares modifyRequestBody.
+  // We consume the stream here so it is fully available in the proxyReq handler.
+  // req.pipe is overridden to a no-op so http-proxy does not also stream the
+  // original (already-consumed) body.
+  let preBufferedRequestBody: Buffer | null = null;
+  if (rule?.modifyRequestBody) {
+    const contentLength = parseInt(req.headers["content-length"] ?? "0", 10);
+    const hasBody = ["POST", "PUT", "PATCH", "DELETE"].includes(req.method ?? "");
+    if (hasBody && (contentLength === 0 || contentLength <= modifyMaxBytes)) {
+      preBufferedRequestBody = await bufferIncomingBody(req, modifyMaxBytes);
+      if (preBufferedRequestBody !== null) {
+        // Prevent http-proxy from trying to pipe the already-consumed stream.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (req as any).pipe = () => req;
+      }
+    }
+  }
+
   // Pipeline path: runs on its own isolated proxy — do NOT register listeners on
   // the shared proxy here, otherwise stale `once` handlers accumulate and fire for
   // the wrong concurrent requests.
   if (rule?.modifyResponseBody) {
-    runResponsePipeline(req, res, proxy, target, rule, domain, config, logger);
+    runResponsePipeline(req, res, proxy, target, rule, domain, config, logger, preBufferedRequestBody);
     return;
   }
 
@@ -110,6 +132,38 @@ export async function handleHttpRequest(
           error: (err as Error).message,
         });
       }
+    }
+
+    // Write the (possibly modified) request body when it was pre-buffered.
+    if (preBufferedRequestBody !== null) {
+      const contentType = Array.isArray(req.headers["content-type"])
+        ? req.headers["content-type"][0]
+        : req.headers["content-type"];
+      const raw = preBufferedRequestBody.toString("utf-8");
+      let modified: string | undefined;
+
+      if (rule?.modifyRequestBody) {
+        try {
+          modified = await rule.modifyRequestBody(raw, {
+            req,
+            proxyReq,
+            res,
+            domain,
+            url: req.url ?? "",
+            contentType,
+          });
+        } catch (err) {
+          logger.error("modifyRequestBody error", {
+            domain,
+            error: (err as Error).message,
+          });
+        }
+      }
+
+      const buf = modified !== undefined ? Buffer.from(modified, "utf-8") : preBufferedRequestBody;
+      proxyReq.setHeader("content-length", buf.length);
+      proxyReq.removeHeader("transfer-encoding");
+      proxyReq.end(buf);
     }
   };
 
