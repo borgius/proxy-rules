@@ -1,5 +1,6 @@
 import { defineConfig } from "vitest/config";
 import { builtinModules } from "node:module";
+import { tmpdir } from "node:os";
 
 // All runtime dependencies are kept external so the dist stays thin.
 const runtimeDeps = [
@@ -17,6 +18,14 @@ const external = [
 ];
 
 export default defineConfig({
+  server: {
+    watch: {
+      ignored: [
+        "**/.proxy-rules/**",
+        `${tmpdir().replace(/\\/g, "/")}/proxy-rule-*`,
+      ],
+    },
+  },
   test: {
     environment: "node",
     globals: false,

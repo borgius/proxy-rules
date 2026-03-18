@@ -32,7 +32,8 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "dev": "vite-node --watch src/index.ts -- serve",
+    "dev": "vite-node src/index.ts -- serve",
+    "dev:watch": "vite-node --watch src/index.ts -- serve",
     "start": "vite-node src/index.ts -- serve",
     "build": "node ./scripts/build.mjs",
     "test": "vitest run",

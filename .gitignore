@@ -33,3 +33,5 @@ coverage/
 
 # Generated runtime certs (do not commit real CAs)
 .proxy-rules-local/
+.proxy-rules/
+tmp

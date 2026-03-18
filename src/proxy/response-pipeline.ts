@@ -15,6 +15,8 @@ const TEXT_CONTENT_TYPES = [
   "application/x-javascript",
 ];
 
+const DEFAULT_CAPTURE_MAX_BYTES = 10 * 1024 * 1024;
+
 function isTextContentType(contentType: string | undefined): boolean {
   if (!contentType) return false;
   return TEXT_CONTENT_TYPES.some((t) => contentType.includes(t));
@@ -63,6 +65,18 @@ export function bufferIncomingBody(
     req.on("end", () => resolve(overLimit ? null : Buffer.concat(chunks)));
     req.on("error", reject);
   });
+}
+
+export function resolveBodyCaptureLimit(config: ProxyConfig, rule?: ProxyRule): number {
+  const loggingMaxBytes = config.logging.maxBodyBytes;
+
+  if (rule?.logging?.captureBody) {
+    return loggingMaxBytes > 0
+      ? Math.max(loggingMaxBytes, DEFAULT_CAPTURE_MAX_BYTES)
+      : DEFAULT_CAPTURE_MAX_BYTES;
+  }
+
+  return loggingMaxBytes > 0 ? loggingMaxBytes : DEFAULT_CAPTURE_MAX_BYTES;
 }
 
 /**
@@ -175,13 +189,56 @@ export function runResponsePipeline(
   // For body modification we need a meaningful cap — treat 0 as "no logging
   // limit" and fall back to a sane 10 MB ceiling so modifyResponseBody runs
   // for typical API responses regardless of the logging setting.
-  const loggingMaxBytes = config.logging.maxBodyBytes;
-  const modifyMaxBytes = loggingMaxBytes > 0 ? loggingMaxBytes : 10 * 1024 * 1024;
+  const modifyMaxBytes = resolveBodyCaptureLimit(config, rule);
 
   proxy.once("proxyRes", (proxyRes: http.IncomingMessage) => {
     const statusCode = proxyRes.statusCode ?? 200;
     const contentType = getSingleHeaderValue(proxyRes.headers["content-type"]);
     const contentEncoding = getSingleHeaderValue(proxyRes.headers["content-encoding"]);
+    const helpers = createContextHelpers();
+    let responseFinalized = false;
+
+    const finalizeResponse = async (bodyModified?: boolean) => {
+      if (responseFinalized) return;
+      responseFinalized = true;
+
+      if (rule.onResponse) {
+        try {
+          await rule.onResponse({ req, proxyRes, res, domain, helpers });
+        } catch (err) {
+          logger.error("onResponse hook error", { domain, error: (err as Error).message });
+        }
+      }
+
+      logger.info("\u2190 HTTP", {
+        method: req.method,
+        url: requestUrl,
+        domain,
+        status: statusCode,
+        ms: Date.now() - startTime,
+        ...(bodyModified === undefined ? {} : { bodyModified }),
+      });
+    };
+
+    const passthroughResponse = async (initialChunk?: Buffer) => {
+      proxyRes.pause();
+      await finalizeResponse();
+
+      if (!res.headersSent) {
+        res.writeHead(statusCode, proxyRes.headers);
+      }
+
+      if (initialChunk && initialChunk.length > 0) {
+        res.write(initialChunk);
+      }
+
+      proxyRes.pipe(res);
+    };
+
+    proxyRes.on("error", (err) => {
+      logger.error("proxyRes stream error", { domain, error: err.message });
+      if (!res.writableEnded) res.end();
+    });
 
     // Only buffer and mutate text-like responses within the size limit
     const contentLength = parseInt(getSingleHeaderValue(proxyRes.headers["content-length"]) ?? "0", 10);
@@ -192,8 +249,7 @@ export function runResponsePipeline(
     const modifyResponseBody = rule.modifyResponseBody;
 
     if (!canBuffer || !modifyResponseBody) {
-      res.writeHead(proxyRes.statusCode ?? 200, proxyRes.headers);
-      proxyRes.pipe(res);
+      void passthroughResponse();
       return;
     }
 
@@ -216,19 +272,26 @@ export function runResponsePipeline(
 
         fellBackToPassthrough = true;
         proxyRes.off("data", onData);
-        res.writeHead(statusCode, proxyRes.headers);
 
         const buffered = Buffer.concat([...chunks, chunk]);
-        res.write(buffered);
         chunks.length = 0;
-        proxyRes.pipe(res);
+        void passthroughResponse(buffered);
       }
     };
 
     proxyRes.on("data", onData);
 
     proxyRes.on("end", async () => {
-      if (fellBackToPassthrough || chunks.length === 0) return;
+      if (fellBackToPassthrough) return;
+
+      if (chunks.length === 0) {
+        await finalizeResponse();
+        if (!res.headersSent) {
+          res.writeHead(statusCode, proxyRes.headers);
+        }
+        res.end();
+        return;
+      }
 
       const body = Buffer.concat(chunks).toString("utf-8");
       // Attach so toCurl(req, proxyRes) picks it up automatically.
@@ -251,35 +314,13 @@ export function runResponsePipeline(
         });
       }
 
-      // Run optional onResponse hook before we write the (possibly mutated) response.
-      if (rule.onResponse) {
-        try {
-          await rule.onResponse({ req, proxyRes, res, domain, helpers: createContextHelpers() });
-        } catch (err) {
-          logger.error("onResponse hook error", { domain, error: (err as Error).message });
-        }
-      }
-
       const finalBody = modified !== undefined ? modified : body;
+      await finalizeResponse(modified !== undefined);
       res.writeHead(
         statusCode,
         buildMutatedResponseHeaders(proxyRes.headers, finalBody),
       );
       res.end(finalBody);
-
-      logger.info("\u2190 HTTP", {
-        method: req.method,
-        url: requestUrl,
-        domain,
-        status: statusCode,
-        ms: Date.now() - startTime,
-        bodyModified: modified !== undefined,
-      });
-    });
-
-    proxyRes.on("error", (err) => {
-      logger.error("proxyRes stream error", { domain, error: err.message });
-      if (!res.writableEnded) res.end();
     });
   });
 

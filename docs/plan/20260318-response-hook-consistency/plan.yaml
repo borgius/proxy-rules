@@ -1,0 +1,227 @@
+plan_id: 20260318-response-hook-consistency
+objective: Ensure `onResponse` runs for every matched HTTP response even when a rule also defines `modifyResponseBody`, while keeping `modifyResponseBody` limited to eligible buffered text responses and adding regression tests for fallback/empty-body cases.
+created_at: 2026-03-18T00:00:00Z
+created_by: GitHub Copilot (GPT-5.4) / gem-planner
+status: pending_approval
+research_confidence: high
+
+tldr: |
+  Current state: any HTTP rule with `modifyResponseBody` is routed through `runResponsePipeline()`, but that pipeline only invokes `onResponse` after successful full-body buffering and mutation. If the response is non-bufferable, falls back to passthrough after exceeding the byte limit, or finishes with an empty buffered body, the client still gets a response but `onResponse` never runs.
+  Target state: `runResponsePipeline()` should treat response observation and body mutation as separate concerns. `onResponse` must run exactly once for every matched upstream response that reaches the proxy, while `modifyResponseBody` continues to run only for buffered text responses that satisfy the existing eligibility checks.
+  Delivery focus: implement the fix in the response pipeline without changing rule-matching semantics, preserve passthrough/streaming behavior for ineligible responses, and add focused tests that lock the previously skipped branches.
+
+open_questions: []
+
+pre_mortem:
+  overall_risk_level: medium
+  critical_failure_modes:
+    - scenario: The fix accidentally forces buffering or mutation for responses that should remain streamed through unchanged, causing memory growth or response corruption on binary/compressed payloads.
+      likelihood: medium
+      impact: high
+      mitigation: Keep the existing `canBuffer` gate intact, separate the `onResponse` call from `modifyResponseBody`, and add regression tests for non-text and over-limit fallback branches.
+    - scenario: `onResponse` fires twice for the same request because both the passthrough/fallback path and the buffered completion path invoke it.
+      likelihood: medium
+      impact: high
+      mitigation: Introduce one request-scoped response finalization path in `runResponsePipeline()` with an explicit once-only guard, then cover fallback and successful buffered mutation with ordered event assertions.
+    - scenario: Logging timing diverges between shared passthrough and pipeline branches, so matched-rule traffic is no longer reported consistently.
+      likelihood: low
+      impact: medium
+      mitigation: Preserve the existing log payload shape and emit the final pipeline log from the same branch that owns `onResponse` completion.
+  assumptions:
+    - The required behavior change applies only after an upstream `proxyRes` exists; requests short-circuited earlier by `onRequest` remain unchanged.
+    - `modifyResponseBody` should remain opt-in and should not run for empty, non-text, compressed, or over-limit responses unless they were already eligible buffered text payloads.
+    - The registry and request matching logic are already correct for this bug; the missed hook execution is isolated to the response pipeline branch.
+
+implementation_specification:
+  code_structure: |
+    Keep request matching and branch selection in `src/proxy/http-handler.ts` unchanged. Concentrate the fix inside `src/proxy/response-pipeline.ts` by separating three responsibilities that are currently tangled together: deciding whether body mutation is allowed, invoking `onResponse`, and emitting the final response/logging behavior. Prefer a small internal helper or closure in the pipeline file rather than broad API changes.
+  affected_areas:
+    - src/proxy/response-pipeline.ts
+    - tests/response-pipeline.test.ts
+    - tests/proxy-logging.test.ts
+  component_details:
+    - component: Pipeline response finalization
+      responsibility: Ensure every matched upstream response in the isolated pipeline invokes `onResponse` exactly once before the response is considered complete, regardless of whether body mutation is skipped, succeeds, or falls back to passthrough.
+      interfaces:
+        - "`runResponsePipeline()` continues to accept the current parameters and return `void`."
+        - "A request-scoped helper or guarded closure owns one-time `onResponse` invocation and final log emission."
+    - component: Body-mutation eligibility gate
+      responsibility: Preserve the existing content-type, content-encoding, and size checks so `modifyResponseBody` only runs for eligible buffered text responses.
+      interfaces:
+        - "The `canBuffer` decision remains the gate for full-body buffering and mutation."
+        - "Fallback-to-passthrough still streams the original upstream bytes without attempting mutation."
+    - component: Regression coverage
+      responsibility: Add focused tests for the branches that currently miss `onResponse`, including ineligible responses, fallback/over-limit behavior, and empty-body completion.
+      interfaces:
+        - "Tests assert hook ordering and one-time invocation, not just final HTTP status/body."
+        - "Logging coverage verifies that matched requests still emit proxy-layer start/finish records after the fix."
+  dependencies:
+    - component: Pipeline response finalization
+      relationship: Depends on the current `proxy.once('proxyRes')` flow and must remain compatible with request-scoped isolated proxies.
+    - component: Regression coverage
+      relationship: Depends on the final control-flow split implemented in `response-pipeline.ts`.
+  integration_points:
+    - Response handling inside `src/proxy/response-pipeline.ts`
+    - Live proxy integration coverage in `tests/response-pipeline.test.ts`
+    - Built-in traffic logging checks in `tests/proxy-logging.test.ts`
+
+contracts:
+  - from_task: RHC-1
+    to_task: RHC-2
+    interface: Pipeline branch behavior matrix covering buffered mutation, direct passthrough, overflow fallback, and empty-body completion.
+    format: "One-time `onResponse` invocation contract plus unchanged eligibility rules for `modifyResponseBody`."
+  - from_task: RHC-2
+    to_task: RHC-3
+    interface: Reproducible regression scenarios proving hook/log behavior for each affected branch.
+    format: "Targeted Vitest cases with ordered event assertions and final HTTP assertions."
+
+tasks:
+  - id: RHC-1
+    title: Design the response-pipeline once-only completion path
+    description: |
+      Map each existing `runResponsePipeline()` response branch to the desired post-fix behavior, then introduce a minimal request-scoped finalization design that guarantees `onResponse` runs exactly once whenever `proxyRes` exists. The design must preserve current streaming behavior for ineligible responses and over-limit fallback, rather than broadening mutation eligibility.
+    wave: 1
+    agent: gem-implementer
+    priority: high
+    status: pending
+    dependencies: []
+    context_files:
+      - /Users/admin/dev/proxy-rules/src/proxy/response-pipeline.ts: Current pipeline logic where `onResponse` only runs on the buffered-success path.
+      - /Users/admin/dev/proxy-rules/src/proxy/http-handler.ts: Shared non-pipeline branch used as the behavioral reference for response logging and hook timing.
+    estimated_effort: medium
+    estimated_files: 2
+    estimated_lines: 140
+    focus_area: response pipeline control flow
+    verification:
+      - Confirm each pipeline exit path (non-bufferable, over-limit fallback, empty buffered body, successful mutation) has exactly one owner for `onResponse` invocation.
+      - Confirm `modifyResponseBody` is still unreachable for non-text, compressed, or over-limit responses.
+    acceptance_criteria:
+      - `onResponse` is no longer coupled exclusively to successful body buffering.
+      - Streaming passthrough remains intact for responses that are not eligible for buffering/mutation.
+      - No public rule API or registry contract changes are required.
+    failure_modes:
+      - scenario: The helper is wired after bytes are already written in one branch, preventing header mutations in `onResponse` from taking effect.
+        likelihood: medium
+        impact: high
+        mitigation: Invoke the finalization helper before writing headers in direct passthrough branches and before `res.end()` in buffered branches.
+      - scenario: Overflow fallback still bypasses the completion helper because the stream switches to `pipe(res)` mid-response.
+        likelihood: medium
+        impact: medium
+        mitigation: Attach the once-only hook/log completion before initiating fallback piping and assert it with a dedicated test.
+    tech_stack:
+      - TypeScript
+      - Node.js streams
+      - http-proxy
+    test_coverage: Existing integration coverage in `tests/response-pipeline.test.ts`, extended with fallback and empty-body regressions.
+
+  - id: RHC-2
+    title: Implement the pipeline fix without broadening mutation semantics
+    description: |
+      Update `src/proxy/response-pipeline.ts` so `onResponse` runs for every matched upstream response handled by the pipeline, including direct passthrough, byte-limit fallback, and empty-body completion. Keep `modifyResponseBody` restricted to eligible buffered text responses and preserve existing request-hook/static-response behavior.
+    wave: 2
+    agent: gem-implementer
+    priority: high
+    status: pending
+    dependencies:
+      - RHC-1
+    context_files:
+      - /Users/admin/dev/proxy-rules/src/proxy/response-pipeline.ts: Primary implementation target.
+      - /Users/admin/dev/proxy-rules/src/plugins/types.ts: Hook contract reference for `onResponse` and `modifyResponseBody` expectations.
+    estimated_effort: medium
+    estimated_files: 1
+    estimated_lines: 180
+    focus_area: once-only response hook execution
+    verification:
+      - Manually reason through each branch to ensure one-time hook execution and unchanged body-mutation gates.
+      - Run targeted test cases for buffered-success, non-bufferable passthrough, empty body, and over-limit fallback responses.
+    acceptance_criteria:
+      - A rule with `modifyResponseBody` still enters the pipeline, but `onResponse` fires even when mutation is skipped or bypassed.
+      - `modifyResponseBody` runs only on eligible buffered text bodies.
+      - Pipeline logging still records matched responses after `onResponse` completion.
+    failure_modes:
+      - scenario: Hook execution order changes so `modifyResponseBody` runs after `onResponse` or logging moves before hook completion.
+        likelihood: low
+        impact: high
+        mitigation: Preserve the existing buffered-success ordering (`modifyResponseBody` then `onResponse` then write/log) while explicitly defining passthrough/fallback ordering in code comments and tests.
+      - scenario: Stream listeners leak or remain attached after fallback, causing duplicate writes or warnings.
+        likelihood: medium
+        impact: medium
+        mitigation: Keep listener teardown explicit when switching from buffering to passthrough and validate with the over-limit scenario.
+    tech_stack:
+      - TypeScript
+      - Node.js streams
+      - http-proxy
+    test_coverage: Required targeted Vitest regression coverage before merge.
+
+  - id: RHC-3
+    title: Lock the regression with integration and logging tests
+    description: |
+      Extend the live proxy tests so they prove `onResponse` executes for matched rules in all affected pipeline branches, and add/adjust logging coverage so proxy-layer request/response logs still appear for matched requests that use `modifyResponseBody`. Include a test shape that mirrors the reported failure mode: a matched rule with `modifyResponseBody`, a successful upstream response, and `onResponse` expected even when the body is not mutated.
+    wave: 3
+    agent: gem-implementer
+    priority: high
+    status: pending
+    dependencies:
+      - RHC-2
+    context_files:
+      - /Users/admin/dev/proxy-rules/tests/response-pipeline.test.ts: Main integration harness for rule hooks and live proxy behavior.
+      - /Users/admin/dev/proxy-rules/tests/proxy-logging.test.ts: Verifies built-in matched-request logging.
+    estimated_effort: medium
+    estimated_files: 2
+    estimated_lines: 220
+    focus_area: regression test matrix
+    verification:
+      - Add ordered event assertions showing `onResponse` fires once for non-bufferable, empty-body, and fallback cases.
+      - Re-run the targeted suites and confirm no regressions in the existing buffered mutation tests.
+    acceptance_criteria:
+      - Tests fail on the current bug and pass after the fix.
+      - Coverage includes at least one case where `modifyResponseBody` is present but skipped while `onResponse` still runs.
+      - Coverage includes at least one case where fallback-to-passthrough occurs after buffering starts.
+    failure_modes:
+      - scenario: Tests only cover synthetic unit paths and miss the real proxy wiring that triggered the bug.
+        likelihood: medium
+        impact: high
+        mitigation: Prefer the existing live proxy harness and event arrays over isolated helper-only tests.
+      - scenario: Logging assertions become flaky because they depend on exact timestamps or unrelated fields.
+        likelihood: low
+        impact: medium
+        mitigation: Assert stable log markers/messages and domain values only.
+    tech_stack:
+      - Vitest
+      - TypeScript
+      - Node.js HTTP test servers
+    test_coverage: Focused integration coverage for `tests/response-pipeline.test.ts` and `tests/proxy-logging.test.ts`.
+
+  - id: RHC-4
+    title: Review targeted regressions and hidden-test risk
+    description: |
+      Perform a focused code review of the pipeline fix against the original bug statement and likely hidden cases. Confirm the implementation did not change rule matching, request short-circuiting, or the shared non-pipeline path, and that all newly added tests reflect the intended contract rather than an accidental implementation detail.
+    wave: 4
+    agent: gem-reviewer
+    priority: medium
+    status: pending
+    dependencies:
+      - RHC-2
+      - RHC-3
+    context_files:
+      - /Users/admin/dev/proxy-rules/src/proxy/response-pipeline.ts: Finalized fix to inspect.
+      - /Users/admin/dev/proxy-rules/tests/response-pipeline.test.ts: Regression matrix.
+      - /Users/admin/dev/proxy-rules/tests/proxy-logging.test.ts: Logging regression checks.
+    estimated_effort: small
+    estimated_files: 3
+    estimated_lines: 120
+    focus_area: regression safety review
+    verification:
+      - Review whether any branch can still exit without calling the guarded completion path after `proxyRes` is emitted.
+      - Review whether hidden tests around `204`, `304`, HEAD-like empty bodies, or binary responses would still satisfy the intended contract.
+    acceptance_criteria:
+      - No remaining branch is identified that can skip `onResponse` after an upstream response is matched.
+      - The final patch is limited to the response pipeline and tests unless review proves a shared helper extraction is necessary.
+    failure_modes:
+      - scenario: Review misses a stream-error edge case where headers are sent before the hook can run.
+        likelihood: low
+        impact: medium
+        mitigation: Explicitly document the intended contract as "when `proxyRes` exists and normal response handling proceeds" and flag any unresolved stream-error ambiguity before merge.
+    requires_review: true
+    review_depth: standard
+    security_sensitive: false

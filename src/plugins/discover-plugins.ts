@@ -23,22 +23,39 @@ export type DiscoveredPlugin = DiscoveredDomainPlugin | DiscoveredGlobalPlugin;
  * Dynamically import a single TypeScript/JavaScript module and extract its
  * default export as a ProxyRule.
  *
- * Cache busting strategy: copy the file to a uniquely-named temp path and
- * import that copy. Every import hits a path the runtime has never seen, so
- * no query-string tricks or runtime-specific cache APIs are needed. The temp
- * file is deleted in the `finally` block so no disk waste accumulates.
+ * Cache busting strategy: under vite-node watch we import the real file URL
+ * with an mtime query so the watcher sees a stable file path; elsewhere we
+ * preserve the temp-copy strategy so tests and non-watch runtime keep their
+ * current behaviour.
  */
+function shouldUseStableWatchImport(): boolean {
+  return process.argv.some((arg) => arg.includes("vite-node"))
+    && process.argv.includes("--watch");
+}
+
 async function importRule(filePath: string): Promise<ProxyRule | null> {
   const realFilePath = realpathSync(filePath);
-  const ext = extname(realFilePath);
-  const tmpPath = join(
-    tmpdir(),
-    `proxy-rule-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`,
-  );
-  copyFileSync(realFilePath, tmpPath);
+
+  let importHref: string;
+  let tmpPath: string | undefined;
+
+  if (shouldUseStableWatchImport()) {
+    const version = statSync(realFilePath).mtimeMs;
+    const fileUrl = pathToFileURL(realFilePath);
+    fileUrl.searchParams.set("t", String(version));
+    importHref = fileUrl.href;
+  } else {
+    const ext = extname(realFilePath);
+    tmpPath = join(
+      tmpdir(),
+      `proxy-rule-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`,
+    );
+    copyFileSync(realFilePath, tmpPath);
+    importHref = pathToFileURL(tmpPath).href;
+  }
 
   try {
-    const mod = await import(pathToFileURL(tmpPath).href);
+    const mod = await import(importHref);
     const rule = mod.default as ProxyRule | undefined;
     if (!rule || typeof rule !== "object") {
       getLogger().warn(`Plugin file ${filePath} has no default export — skipping`);
@@ -51,7 +68,9 @@ async function importRule(filePath: string): Promise<ProxyRule | null> {
     });
     return null;
   } finally {
-    try { unlinkSync(tmpPath); } catch { /* best-effort cleanup */ }
+    if (tmpPath) {
+      try { unlinkSync(tmpPath); } catch { /* best-effort cleanup */ }
+    }
   }
 }
 

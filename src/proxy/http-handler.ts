@@ -7,7 +7,7 @@ import type { ProxyConfig } from "../config/schema.ts";
 import type { CaAssets } from "../tls/ca-store.ts";
 import type { StaticResponse } from "../plugins/types.ts";
 import { createContextHelpers } from "../plugins/context-helpers.ts";
-import { runResponsePipeline, bufferIncomingBody } from "./response-pipeline.ts";
+import { runResponsePipeline, bufferIncomingBody, resolveBodyCaptureLimit } from "./response-pipeline.ts";
 
 type PipeOverridableRequest = http.IncomingMessage & {
   proxyTarget?: string;
@@ -85,8 +85,7 @@ export async function handleHttpRequest(
   (req as http.IncomingMessage & { proxyTarget?: string }).proxyTarget = target;
 
   // Use the same byte cap as the response-body modifier.
-  const loggingMaxBytes = config.logging.maxBodyBytes;
-  const modifyMaxBytes = loggingMaxBytes > 0 ? loggingMaxBytes : 10 * 1024 * 1024;
+  const modifyMaxBytes = resolveBodyCaptureLimit(config, rule ?? undefined);
 
   // Pre-buffer the request body when the rule declares modifyRequestBody.
   // We consume the stream here so it is fully available in the proxyReq handler.

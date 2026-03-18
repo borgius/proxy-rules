@@ -1,6 +1,8 @@
 import http from "node:http";
 import type net from "node:net";
 import type { Command } from "commander";
+import type { FSWatcher } from "chokidar";
+import type httpProxy from "http-proxy";
 import picocolors from "picocolors";
 import { loadConfig } from "../config/load-config.ts";
 import { initLogger, getLogger } from "../logging/logger.ts";
@@ -14,6 +16,79 @@ import { watchRules } from "../watch/watch-config-and-rules.ts";
 import { existsSync } from "node:fs";
 import type { CaAssets } from "../tls/ca-store.ts";
 
+interface ActiveServeRuntime {
+  server: http.Server;
+  proxy: httpProxy;
+  watcher?: FSWatcher;
+  shutdownHandler: () => void;
+}
+
+const ACTIVE_SERVE_RUNTIME_KEY = Symbol.for("proxy-rules.active-serve-runtime");
+
+type GlobalWithActiveServeRuntime = typeof globalThis & {
+  [ACTIVE_SERVE_RUNTIME_KEY]?: ActiveServeRuntime;
+};
+
+function getActiveServeRuntime(): ActiveServeRuntime | undefined {
+  return (globalThis as GlobalWithActiveServeRuntime)[ACTIVE_SERVE_RUNTIME_KEY];
+}
+
+function setActiveServeRuntime(runtime: ActiveServeRuntime | undefined): void {
+  const state = globalThis as GlobalWithActiveServeRuntime;
+
+  if (runtime) {
+    state[ACTIVE_SERVE_RUNTIME_KEY] = runtime;
+    return;
+  }
+
+  delete state[ACTIVE_SERVE_RUNTIME_KEY];
+}
+
+async function closeServer(server: http.Server): Promise<void> {
+  if (!server.listening) {
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    server.close((err) => (err ? reject(err) : resolve()));
+  });
+}
+
+export async function stopActiveServeRuntime(): Promise<void> {
+  const runtime = getActiveServeRuntime();
+  if (!runtime) {
+    return;
+  }
+
+  setActiveServeRuntime(undefined);
+  process.off("SIGINT", runtime.shutdownHandler);
+  process.off("SIGTERM", runtime.shutdownHandler);
+
+  if (runtime.watcher) {
+    await runtime.watcher.close();
+  }
+
+  await closeServer(runtime.server);
+  runtime.proxy.close();
+}
+
+async function listen(server: http.Server, port: number, host: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (err: Error) => {
+      server.off("listening", onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, host);
+  });
+}
+
 export function registerServeCommand(program: Command): void {
   program
     .command("serve")
@@ -23,6 +98,8 @@ export function registerServeCommand(program: Command): void {
     .option("--port <n>", "Listening port", (v) => parseInt(v, 10))
     .option("--host <addr>", "Bind address")
     .action(async (opts: { config?: string; rules?: string; port?: number; host?: string }) => {
+      await stopActiveServeRuntime();
+
       const { config, paths } = loadConfig({
         configDir: opts.config,
         rulesDir: opts.rules,
@@ -57,8 +134,9 @@ export function registerServeCommand(program: Command): void {
       const registry = await buildRegistry(paths.rulesDir, config.ignoreSubDomains);
 
       // Start hot reload
+      let watcher: FSWatcher | undefined;
       if (config.pluginHotReload) {
-        watchRules(paths.rulesDir, registry);
+        watcher = watchRules(paths.rulesDir, registry);
       }
 
       // Create proxy engine
@@ -90,7 +168,37 @@ export function registerServeCommand(program: Command): void {
         });
       });
 
-      server.listen(config.port, config.host, () => {
+      const gracefulShutdown = () => {
+        logger.info("Shutting down…");
+        void stopActiveServeRuntime()
+          .then(() => {
+            process.exit(0);
+          })
+          .catch((err) => {
+            logger.error("Failed to shut down cleanly", { error: (err as Error).message });
+            process.exit(1);
+          });
+      };
+
+      const runtime: ActiveServeRuntime = {
+        server,
+        proxy,
+        watcher,
+        shutdownHandler: gracefulShutdown,
+      };
+
+      setActiveServeRuntime(runtime);
+      process.on("SIGINT", gracefulShutdown);
+      process.on("SIGTERM", gracefulShutdown);
+
+      try {
+        await listen(server, config.port, config.host);
+      } catch (err) {
+        await stopActiveServeRuntime();
+        throw err;
+      }
+
+      {
         const addr = `${config.host}:${config.port}`;
         const configSources = paths.configFiles.length > 0
           ? paths.configFiles.map((file) => `    - ${picocolors.dim(file)}`).join("\n")
@@ -113,17 +221,6 @@ export function registerServeCommand(program: Command): void {
             "",
           ].join("\n"),
         );
-      });
-
-      const gracefulShutdown = () => {
-        logger.info("Shutting down…");
-        server.close(() => {
-          proxy.close();
-          process.exit(0);
-        });
-      };
-
-      process.on("SIGINT", gracefulShutdown);
-      process.on("SIGTERM", gracefulShutdown);
+      }
     });
 }

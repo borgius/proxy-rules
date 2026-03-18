@@ -46,20 +46,22 @@ initLogger(config.logging);
 async function withProxy(
   rule: ProxyRule,
   fn: (port: number) => Promise<void>,
+  proxyConfig: ProxyConfig = config,
 ): Promise<void> {
   const registry = new PluginRegistry(config.ignoreSubDomains);
   registry.replace([{ domain: "dummyjson.com", rule }]);
 
-  return withProxyPlugins(registry, fn);
+  return withProxyPlugins(registry, fn, proxyConfig);
 }
 
 async function withProxyPlugins(
   registry: PluginRegistry,
   fn: (port: number) => Promise<void>,
+  proxyConfig: ProxyConfig = config,
 ): Promise<void> {
   const proxy = createProxyServer();
   const server = http.createServer((req, res) => {
-    void handleHttpRequest(req, res, proxy, registry, config);
+    void handleHttpRequest(req, res, proxy, registry, proxyConfig);
   });
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -77,11 +79,12 @@ async function withProxyPlugins(
 async function withDiscoveredPlugins(
   plugins: DiscoveredPlugin[],
   fn: (port: number) => Promise<void>,
+  proxyConfig: ProxyConfig = config,
 ): Promise<void> {
   const registry = new PluginRegistry(config.ignoreSubDomains);
   registry.replace(plugins);
 
-  return withProxyPlugins(registry, fn);
+  return withProxyPlugins(registry, fn, proxyConfig);
 }
 
 async function withUpstream(
@@ -451,6 +454,188 @@ describe("response pipeline — effective HTTP rule integration", () => {
         expect(withMissedGlobal).toEqual(baseline);
       },
     );
+  });
+});
+
+describe("response pipeline — onResponse regressions", () => {
+  test("runs modifyResponseBody when rule logging.captureBody is true despite a small global limit", async () => {
+    const events: string[] = [];
+    const tinyGlobalLimitConfig: ProxyConfig = {
+      ...config,
+      logging: {
+        ...config.logging,
+        maxBodyBytes: 4,
+      },
+    };
+
+    await withUpstream(
+      (_req, res) => {
+        res.writeHead(200, {
+          "content-type": "application/json",
+          "content-length": "19",
+        });
+        res.end('{"message":"hello"}');
+      },
+      async (upstreamPort) => {
+        await withProxy(
+          {
+            target: `http://127.0.0.1:${upstreamPort}`,
+            logging: {
+              captureBody: true,
+            },
+            modifyResponseBody(body) {
+              events.push(`modifyResponseBody:${body}`);
+              return body.replace("hello", "proxied");
+            },
+            onResponse(ctx) {
+              events.push("onResponse");
+              ctx.res.setHeader("x-on-response", "capture-body");
+            },
+          },
+          async (proxyPort) => {
+            const response = await requestThroughProxy(proxyPort, {
+              host: "dummyjson.com",
+              path: "/capture-body",
+            });
+
+            expect(response.status).toBe(200);
+            expect(response.body).toBe('{"message":"proxied"}');
+            expect(response.headers["x-on-response"]).toBe("capture-body");
+          },
+          tinyGlobalLimitConfig,
+        );
+      },
+    );
+
+    expect(events).toEqual([
+      'modifyResponseBody:{"message":"hello"}',
+      "onResponse",
+    ]);
+  });
+
+  test("runs onResponse for non-bufferable passthrough responses", async () => {
+    const events: string[] = [];
+
+    await withUpstream(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "application/octet-stream" });
+        res.end("raw-binary-payload");
+      },
+      async (upstreamPort) => {
+        await withProxy(
+          {
+            target: `http://127.0.0.1:${upstreamPort}`,
+            modifyResponseBody(body) {
+              events.push(`modifyResponseBody:${body}`);
+              return `${body}|mutated`;
+            },
+            onResponse(ctx) {
+              events.push("onResponse");
+              ctx.res.setHeader("x-on-response", "non-bufferable");
+            },
+          },
+          async (proxyPort) => {
+            const response = await requestThroughProxy(proxyPort, {
+              host: "dummyjson.com",
+              path: "/binary",
+            });
+
+            expect(response.status).toBe(200);
+            expect(response.body).toBe("raw-binary-payload");
+            expect(response.headers["x-on-response"]).toBe("non-bufferable");
+          },
+        );
+      },
+    );
+
+    expect(events).toEqual(["onResponse"]);
+  });
+
+  test("runs onResponse for empty-body responses without invoking modifyResponseBody", async () => {
+    const events: string[] = [];
+
+    await withUpstream(
+      (_req, res) => {
+        res.writeHead(200, {
+          "content-type": "text/plain",
+          "content-length": "0",
+        });
+        res.end();
+      },
+      async (upstreamPort) => {
+        await withProxy(
+          {
+            target: `http://127.0.0.1:${upstreamPort}`,
+            modifyResponseBody(body) {
+              events.push(`modifyResponseBody:${body}`);
+              return `${body}|mutated`;
+            },
+            onResponse(ctx) {
+              events.push("onResponse");
+              ctx.res.setHeader("x-on-response", "empty-body");
+            },
+          },
+          async (proxyPort) => {
+            const response = await requestThroughProxy(proxyPort, {
+              host: "dummyjson.com",
+              path: "/empty",
+            });
+
+            expect(response.status).toBe(200);
+            expect(response.body).toBe("");
+            expect(response.headers["x-on-response"]).toBe("empty-body");
+          },
+        );
+      },
+    );
+
+    expect(events).toEqual(["onResponse"]);
+  });
+
+  test("runs onResponse exactly once when buffering falls back to passthrough", async () => {
+    const events: string[] = [];
+    const smallBodyLimitConfig: ProxyConfig = {
+      ...config,
+      logging: {
+        ...config.logging,
+        maxBodyBytes: 4,
+      },
+    };
+
+    await withUpstream(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("12345");
+      },
+      async (upstreamPort) => {
+        await withProxy(
+          {
+            target: `http://127.0.0.1:${upstreamPort}`,
+            modifyResponseBody(body) {
+              events.push(`modifyResponseBody:${body}`);
+              return `${body}|mutated`;
+            },
+            onResponse(ctx) {
+              events.push("onResponse");
+              ctx.res.setHeader("x-on-response", "fallback");
+            },
+          },
+          async (proxyPort) => {
+            const response = await requestThroughProxy(proxyPort, {
+              host: "dummyjson.com",
+              path: "/fallback",
+            });
+
+            expect(response.status).toBe(200);
+            expect(response.body).toBe("12345");
+            expect(response.headers["x-on-response"]).toBe("fallback");
+          },
+          smallBodyLimitConfig,
+        );
+      },
+    );
+
+    expect(events).toEqual(["onResponse"]);
   });
 });
 

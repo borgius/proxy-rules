@@ -154,7 +154,11 @@ export type ProxyRuleMatch = string | RegExp | ProxyRuleMatchFn;
 export interface RuleLogging {
   /** If true, log request headers and metadata for this domain. Default: inherits global. */
   enabled?: boolean;
-  /** If true, capture request and response bodies (up to maxBodyBytes). */
+  /**
+   * If true, capture request and response bodies.
+   * When the global `maxBodyBytes` is disabled or very small, body hooks use a sane
+   * per-rule fallback ceiling so capture-focused rules can still inspect typical API payloads.
+   */
   captureBody?: boolean;
 }
 
@@ -236,7 +240,7 @@ export interface ProxyRule {
   /**
    * Called with the complete response body for text responses that are:
    * - Content-Type: text/... or application/json or application/xml
-   * - Size ≤ global `maxBodyBytes`
+    * - Size ≤ the effective body capture limit (`maxBodyBytes`, or a per-rule capture fallback)
    *
    * Return the (modified) body string, or undefined to leave it unchanged.
    */

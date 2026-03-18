@@ -1,13 +1,15 @@
 import { describe, expect, test, beforeEach } from "vitest";
 import { EventEmitter } from "node:events";
-import type http from "node:http";
+import http from "node:http";
 import type net from "node:net";
 import type httpProxy from "http-proxy";
 import { initLogger } from "../src/logging/logger.ts";
 import { PluginRegistry } from "../src/plugins/plugin-registry.ts";
 import { handleHttpRequest } from "../src/proxy/http-handler.ts";
 import { handleWebSocketUpgrade } from "../src/proxy/websocket-handler.ts";
+import { createProxyServer } from "../src/proxy/create-http-proxy.ts";
 import type { ProxyConfig } from "../src/config/schema.ts";
+import type { ProxyRule } from "../src/plugins/types.ts";
 
 const config: ProxyConfig = {
   port: 8080,
@@ -87,6 +89,71 @@ function createSocket(): net.Socket {
   return socket;
 }
 
+async function withLiveProxy(
+  rule: ProxyRule,
+  fn: (port: number) => Promise<void>,
+): Promise<void> {
+  const registry = new PluginRegistry(config.ignoreSubDomains);
+  registry.replace([{ domain: "monitored.internal", rule }]);
+
+  const proxy = createProxyServer();
+  const server = http.createServer((req, res) => {
+    void handleHttpRequest(req, res, proxy, registry, config);
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as net.AddressInfo;
+
+  try {
+    await fn(port);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+}
+
+async function withUpstream(
+  handler: http.RequestListener,
+  fn: (port: number) => Promise<void>,
+): Promise<void> {
+  const server = http.createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as net.AddressInfo;
+
+  try {
+    await fn(port);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+}
+
+async function requestThroughProxy(proxyPort: number, path = "/status"): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port: proxyPort,
+        path,
+        method: "GET",
+        headers: {
+          host: "monitored.internal",
+          "accept-encoding": "identity",
+        },
+      },
+      (res) => {
+        res.resume();
+        res.on("end", resolve);
+      },
+    );
+
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 beforeEach(() => {
   initLogger(config.logging);
 });
@@ -122,6 +189,34 @@ describe("built-in traffic logging", () => {
         createProxy(200),
         createRegistry(true),
         config,
+      );
+    });
+
+    expect(output).toContain('"msg":"→ HTTP"');
+    expect(output).toContain('"msg":"← HTTP"');
+    expect(output).toContain('"domain":"monitored.internal"');
+  });
+
+  test("emits HTTP request logs on the response pipeline passthrough path", async () => {
+    const output = await captureStdout(async () => {
+      await withUpstream(
+        (_req, res) => {
+          res.writeHead(200, { "content-type": "application/octet-stream" });
+          res.end("raw");
+        },
+        async (upstreamPort) => {
+          await withLiveProxy(
+            {
+              target: `http://127.0.0.1:${upstreamPort}`,
+              modifyResponseBody(body) {
+                return `${body}|mutated`;
+              },
+            },
+            async (proxyPort) => {
+              await requestThroughProxy(proxyPort, "/pipeline-passthrough");
+            },
+          );
+        },
       );
     });
 
