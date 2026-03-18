@@ -95,7 +95,9 @@ my-project/
 ```
 ~/.proxy-rules/
 ├── config.json          # Global config (see below)
-├── rules/               # Per-domain plugin folders
+├── rules/               # Domain-specific and HTTP-global rules
+│   ├── global/
+│   │   └── path-prefix.js  # HTTP-global rule matched by URL
 │   ├── example.com/
 │   │   └── index.js     # Rule plugin for example.com
 │   └── api.acme.org/
@@ -129,9 +131,16 @@ my-project/
 
 ## Rule plugins
 
-A rule plugin is a JavaScript file (or `index.js` in a folder) that exports a default `ProxyRule` object. TypeScript files are also supported when running via `vite-node` (`npm run dev`). Rules are matched by normalising the requested hostname (stripping configured `ignoreSubDomains` entries like `www`) and looking up a matching folder under the active rules directory (`--rules`, `<git-root>/.proxy-rules/rules`, or `~/.proxy-rules/rules`).
+A rule plugin is a JavaScript file (or `index.js` in a folder) that exports a default `ProxyRule` object. TypeScript files are also supported when running via `vite-node` (`npm run dev`).
 
-### Minimal example
+There are two rule namespaces under the active rules directory (`--rules`, `<git-root>/.proxy-rules/rules`, or `~/.proxy-rules/rules`):
+
+- `rules/<domain>/...` for **domain-specific** rules matched by normalized hostname.
+- `rules/global/<name>.js` or `rules/global/<name>/index.js` for **HTTP-global** rules matched by URL.
+
+`rules/global` is reserved for HTTP-global rules and is never treated as a hostname.
+
+### Domain rule — minimal example
 
 ```javascript
 // ~/.proxy-rules/rules/example.com/index.js
@@ -143,6 +152,70 @@ const rule = {
 
 export default rule;
 ```
+
+### HTTP-global rules — `rules/global`
+
+Global rules let you apply the same HTTP behavior across many hosts. Each immediate child of `rules/global` is one global rule:
+
+```text
+~/.proxy-rules/rules/
+├── global/
+│   ├── path-prefix.js
+│   └── audit/
+│       └── index.js
+└── api.example.com/
+  └── index.js
+```
+
+Supported matcher variants for `rules/global`:
+
+| `match` value | Runtime behavior |
+|---|---|
+| omitted | Matches every HTTP request |
+| `'/api/'` | Matches when the full request URL contains the string (`url.includes(...)`) |
+| `/\/admin\//` | Matches when the regular expression passes against the full request URL |
+| `(url, req) => boolean` | Synchronous predicate using the full request URL and request object |
+| `async (url, req) => boolean` | Asynchronous predicate using the full request URL and request object |
+
+Matcher evaluation uses the **full absolute request URL**:
+
+- Plain HTTP proxy requests already arrive as absolute URLs such as `http://api.example.com/v1/users?active=true`.
+- Decrypted HTTPS requests arrive as relative paths, and the proxy reconstructs them before matching, for example `https://api.example.com/secure/orders?id=42`.
+
+`match` is only interpreted for rules discovered from `rules/global`; it is ignored for normal `rules/<domain>` rules.
+
+### Global + domain ordering and precedence
+
+When a request matches one or more global rules, the proxy composes them with the resolved domain rule for that request.
+
+- Matched globals are evaluated in **descending `priority`** order.
+- If priorities are equal, globals keep their stable discovery order from `rules/global` (alphabetical immediate-child order).
+- The resolved domain rule runs **after** all matched globals, so domain-specific behavior stays most authoritative.
+
+That ordering affects composed behavior like this:
+
+| Rule field / hook | Composition behavior |
+|---|---|
+| `target` | Last defined value wins, so the domain rule overrides matched globals |
+| `resolveTarget` | All matching functions run in order; the last non-`undefined` result wins, so the domain rule can override globals |
+| `logging` | Later properties override earlier ones, so the domain rule wins on conflicts |
+| `onRequest` | Runs global-first, domain-last; stops immediately at the first returned `StaticResponse` |
+| `modifyRequestBody` | Chains sequentially: globals first, domain last |
+| `onResponse` | Runs global-first, domain-last |
+| `modifyResponseBody` | Chains sequentially: globals first, domain last |
+
+If no global rule matches, HTTP behavior stays domain-only.
+
+### Scope and hot reload
+
+Global matchers are evaluated only in the **HTTP request path**:
+
+- plain HTTP forward-proxy requests, and
+- decrypted HTTPS requests after CONNECT interception hands them to the HTTP handler.
+
+Raw CONNECT decisions and WebSocket upgrades still resolve rules by hostname only; they do not evaluate `rules/global` matchers.
+
+With `pluginHotReload` enabled (the default), changes under `rules/global` are reloaded without restarting the proxy. Adding, changing, and removing global rule files all take effect automatically.
 
 ### Request/response hooks
 
@@ -333,6 +406,7 @@ The [`examples/`](examples/) directory contains ready-to-use rules covering the 
 | [`maintenance.example.com`](examples/rules/maintenance.example.com/index.js) | 503 maintenance page |
 | [`api.example.com`](examples/rules/api.example.com/index.js) | Selective 403 block + header injection |
 | [`gateway.example.com`](examples/rules/gateway.example.com/index.js) | Path-based routing to different backends |
+| [`global/path-prefix.js`](examples/rules/global/path-prefix.js) | URL-pattern global rule that runs before matching domain rules |
 | [`shop.example.com`](examples/rules/shop.example.com/index.js) | A/B canary traffic splitting |
 | [`cors.example.com`](examples/rules/cors.example.com/index.js) | Local OPTIONS preflight handler |
 | [`headers.example.com`](examples/rules/headers.example.com/index.js) | Add, override, and remove **request headers** |

@@ -1,0 +1,556 @@
+plan_id: 20260318-global-rules
+objective: add support for global rules in rules/global whose match function can be string, RegExp, sync function, or async function and should return true when the request URL matches
+focus_area: request/response pipeline and where request matching should happen before running hooks
+created_at: 2026-03-18T00:00:00Z
+created_by: GitHub Copilot (GPT-5.4)
+status: completed
+
+tldr: |
+  - HTTP request handling is split between `handleHttpRequest()` (`src/proxy/http-handler.ts:28`) and `runResponsePipeline()` (`src/proxy/response-pipeline.ts:79`); both execute request/response hooks after host-based rule resolution via `PluginRegistry.resolve()`.
+  - Current rule selection is hostname-only (`src/plugins/plugin-registry.ts:69`), so a `rules/global` folder would not participate in request matching unless discovery/registry APIs are extended beyond exact domain lookup.
+  - The best HTTP insertion point for URL-based global matching is in `handleHttpRequest()` after host/domain normalization and before `resolveTarget`, request-body prebuffering, pipeline branching, or shared-proxy listener registration.
+  - The request data already available before hooks is sufficient to evaluate a global URL match: `req`, `req.url`, `req.headers.host`, normalized `domain`, and reconstructable absolute URL semantics from `buildReqUrl()` (`src/plugins/context-helpers.ts:10`).
+  - Composition has important existing constraints: `mergeRules()` composes `onRequest`/`onResponse`/`onConnect` but does not preserve `onRequest` return values and does not merge `resolveTarget` or `modifyRequestBody`, which is a material risk for any global+domain combination strategy.
+
+research_metadata:
+  methodology: hybrid retrieval using semantic_search, grep_search, symbol usage discovery, targeted file reads, and repository memory review
+  scope: focused on HTTP request handling, response pipeline, plugin discovery/registry, CONNECT/WebSocket entry points, and directly related tests
+  confidence: high
+  coverage: 88
+
+files_analyzed:
+  - file: http-handler.ts
+    path: src/proxy/http-handler.ts
+    purpose: Main HTTP request entry point; resolves host rule, computes target, buffers request bodies, selects pipeline vs passthrough path, and invokes request/response hooks.
+    key_elements:
+      - element: handleHttpRequest
+        type: function
+        location: src/proxy/http-handler.ts:28
+        description: Resolves a rule from the request host, computes target, optionally prebuffers request body, and either enters the response pipeline or registers shared proxy listeners.
+      - element: registry.resolve(rawHost)
+        type: pattern
+        location: src/proxy/http-handler.ts:41
+        description: Single current rule-selection step; purely hostname-based.
+      - element: resolveTarget invocation
+        type: pattern
+        location: src/proxy/http-handler.ts:65
+        description: Per-request target override executed before proxying.
+      - element: runResponsePipeline branch
+        type: pattern
+        location: src/proxy/http-handler.ts:105
+        description: Switches to isolated proxy pipeline when `modifyResponseBody` exists.
+      - element: onRequest invocation
+        type: pattern
+        location: src/proxy/http-handler.ts:113
+        description: Executes request hook on the shared-proxy passthrough path.
+      - element: onResponse invocation
+        type: pattern
+        location: src/proxy/http-handler.ts:172
+        description: Executes response hook on the shared-proxy passthrough path.
+    language: TypeScript
+    lines: 186
+
+  - file: response-pipeline.ts
+    path: src/proxy/response-pipeline.ts
+    purpose: Isolated per-request proxy path used when response-body mutation is enabled; runs request hooks, optional body mutation, and response hooks.
+    key_elements:
+      - element: runResponsePipeline
+        type: function
+        location: src/proxy/response-pipeline.ts:79
+        description: Creates request-scoped proxy, handles request hook execution, response buffering, body mutation, and final response write.
+      - element: bufferIncomingBody
+        type: function
+        location: src/proxy/response-pipeline.ts:37
+        description: Prebuffers incoming request body up to a size limit.
+      - element: onRequest invocation inside pipeline
+        type: pattern
+        location: src/proxy/response-pipeline.ts:123
+        description: Runs request hook inside isolated proxy `proxyReq` event before upstream write.
+      - element: modifyResponseBody invocation
+        type: pattern
+        location: src/proxy/response-pipeline.ts:238
+        description: Runs body mutation after full upstream body buffering.
+      - element: onResponse invocation inside pipeline
+        type: pattern
+        location: src/proxy/response-pipeline.ts:256
+        description: Runs response hook before writing mutated/final body.
+    language: TypeScript
+    lines: 280
+
+  - file: types.ts
+    path: src/plugins/types.ts
+    purpose: Defines hook contracts and the request/response/connect contexts exposed to rules.
+    key_elements:
+      - element: RequestContext
+        type: interface
+        location: src/plugins/types.ts:88
+        description: Current request hook context with `req`, `proxyReq`, `res`, `domain`, and `url`.
+      - element: ResponseContext
+        type: interface
+        location: src/plugins/types.ts:101
+        description: Current response hook context with `req`, `proxyRes`, `res`, `domain`, and helpers.
+      - element: RequestBodyContext
+        type: interface
+        location: src/plugins/types.ts:119
+        description: Request-body mutation context including request content type.
+      - element: ConnectContext
+        type: interface
+        location: src/plugins/types.ts:134
+        description: CONNECT-only context with socket, authority, and normalized domain.
+      - element: ProxyRule
+        type: interface
+        location: src/plugins/types.ts:154
+        description: Contract for target resolution and request/response/connect/WebSocket hooks.
+    language: TypeScript
+    lines: 249
+
+  - file: plugin-registry.ts
+    path: src/plugins/plugin-registry.ts
+    purpose: Hostname normalization and rule lookup registry.
+    key_elements:
+      - element: PluginRegistry
+        type: class
+        location: src/plugins/plugin-registry.ts:49
+        description: Stores discovered plugins and resolves the first exact host match by priority.
+      - element: resolve
+        type: function
+        location: src/plugins/plugin-registry.ts:69
+        description: Exact hostname resolver with `ignoreSubDomains` normalization.
+      - element: normalizeHostname
+        type: function
+        location: src/plugins/plugin-registry.ts:11
+        description: Removes configured ignored subdomains such as `www`.
+      - element: extractHostname
+        type: function
+        location: src/plugins/plugin-registry.ts:29
+        description: Strips ports from host headers and CONNECT authorities.
+    language: TypeScript
+    lines: 106
+
+  - file: discover-plugins.ts
+    path: src/plugins/discover-plugins.ts
+    purpose: Loads rule modules from the rules directory and merges multiple modules in a domain folder.
+    key_elements:
+      - element: mergeRules
+        type: function
+        location: src/plugins/discover-plugins.ts:53
+        description: Combines multiple `ProxyRule` objects, composing selected hooks and taking last-wins for some scalar fields.
+      - element: discoverPlugins
+        type: function
+        location: src/plugins/discover-plugins.ts:145
+        description: Scans the rules directory, mapping domain folders/files to discovered plugins.
+      - element: loadDomainFolder
+        type: function
+        location: src/plugins/discover-plugins.ts:113
+        description: Loads all JS/TS files in a domain folder and merges them.
+    language: TypeScript
+    lines: 171
+
+  - file: context-helpers.ts
+    path: src/plugins/context-helpers.ts
+    purpose: Builds helper utilities and reconstructs absolute request URLs when the incoming request URL is relative.
+    key_elements:
+      - element: buildReqUrl
+        type: function
+        location: src/plugins/context-helpers.ts:10
+        description: Reconstructs an absolute request URL from `req.url`, `req.headers.host`, and socket encryption state.
+      - element: toFetch
+        type: function
+        location: src/plugins/context-helpers.ts:138
+        description: Exposes fetch-ready URL/options derived from the original request.
+    language: TypeScript
+    lines: 177
+
+  - file: connect-handler.ts
+    path: src/proxy/connect-handler.ts
+    purpose: Handles CONNECT interception and passes decrypted HTTP traffic back through the normal HTTP handler.
+    key_elements:
+      - element: shouldInterceptConnect
+        type: function
+        location: src/proxy/connect-handler.ts:49
+        description: CONNECT interception decision based on host rule presence.
+      - element: handleConnect
+        type: function
+        location: src/proxy/connect-handler.ts:298
+        description: Resolves the CONNECT host rule, runs `onConnect`, and creates passthrough or MITM tunnel.
+    language: TypeScript
+    lines: 349
+
+  - file: websocket-handler.ts
+    path: src/proxy/websocket-handler.ts
+    purpose: Handles WebSocket upgrades and invokes WebSocket lifecycle hooks after host-based rule resolution.
+    key_elements:
+      - element: handleWebSocketUpgrade
+        type: function
+        location: src/proxy/websocket-handler.ts:14
+        description: Resolves rule by host, computes WS target, and invokes open/close hooks.
+    language: TypeScript
+    lines: 54
+
+  - file: plugins.test.ts
+    path: tests/plugins.test.ts
+    purpose: Verifies plugin discovery and exact host registry resolution behavior.
+    key_elements:
+      - element: PluginRegistry.resolve tests
+        type: testing
+        location: tests/plugins.test.ts:89
+        description: Confirms exact-domain, port-stripping, ignored-subdomain, and unknown-domain behavior.
+    language: TypeScript
+    lines: 144
+
+  - file: response-pipeline.test.ts
+    path: tests/response-pipeline.test.ts
+    purpose: End-to-end tests for the isolated response pipeline path.
+    key_elements:
+      - element: response pipeline integration tests
+        type: testing
+        location: tests/response-pipeline.test.ts:114
+        description: Exercises live request passthrough and response-body mutation through the full HTTP handler + response pipeline stack.
+    language: TypeScript
+    lines: 190
+
+patterns_found:
+  - category: architecture
+    pattern: Hostname-first rule resolution
+    description: All current request handling paths begin with exact host/authority lookup in `PluginRegistry.resolve()`; there is no pre-hook URL matcher layer today.
+    examples:
+      - file: src/proxy/http-handler.ts
+        location: src/proxy/http-handler.ts:41
+        snippet: const rule = registry.resolve(rawHost);
+      - file: src/proxy/connect-handler.ts
+        location: src/proxy/connect-handler.ts:316
+        snippet: const rule = registry.resolve(hostname);
+      - file: src/proxy/websocket-handler.ts
+        location: src/proxy/websocket-handler.ts:27
+        snippet: const rule = registry.resolve(rawHost);
+    prevalence: common
+
+  - category: structure
+    pattern: Dual HTTP execution paths
+    description: HTTP requests split into a shared-proxy passthrough path and an isolated per-request pipeline path depending on whether `modifyResponseBody` is defined.
+    examples:
+      - file: src/proxy/http-handler.ts
+        location: src/proxy/http-handler.ts:105
+        snippet: if (rule?.modifyResponseBody) { runResponsePipeline(...); return; }
+      - file: src/proxy/response-pipeline.ts
+        location: src/proxy/response-pipeline.ts:79
+        snippet: export function runResponsePipeline(...)
+    prevalence: common
+
+  - category: structure
+    pattern: Request context is built incrementally from transport data
+    description: Request URL semantics depend on request form; absolute URLs arrive on plain HTTP proxy requests, while decrypted CONNECT requests can be relative and need host/scheme reconstruction.
+    examples:
+      - file: src/proxy/http-handler.ts
+        location: src/proxy/http-handler.ts:25
+        snippet: Handle plain HTTP forward-proxy requests ... Also handles relative requests arriving after CONNECT tunnel decryption.
+      - file: src/plugins/context-helpers.ts
+        location: src/plugins/context-helpers.ts:10
+        snippet: function buildReqUrl(req: http.IncomingMessage): string {
+    prevalence: common
+
+  - category: architecture
+    pattern: Hook invocation is localized to concrete transport phases
+    description: `onRequest` is invoked from `proxyReq`, `onResponse` from `proxyRes`/response completion, and `onConnect` / WebSocket hooks from their own entry points.
+    examples:
+      - file: src/proxy/http-handler.ts
+        location: src/proxy/http-handler.ts:113
+        snippet: if (rule?.onRequest) {
+      - file: src/proxy/response-pipeline.ts
+        location: src/proxy/response-pipeline.ts:256
+        snippet: await rule.onResponse({ req, proxyRes, res, domain, helpers: createContextHelpers() });
+      - file: src/proxy/connect-handler.ts
+        location: src/proxy/connect-handler.ts:327
+        snippet: await rule.onConnect({ socket: clientSocket, authority, domain });
+    prevalence: common
+
+  - category: architecture
+    pattern: Folder-level rule composition for multi-file domains
+    description: Multiple files in a domain folder are merged into one `ProxyRule`, with composed hooks and last-wins behavior for selected fields.
+    examples:
+      - file: src/plugins/discover-plugins.ts
+        location: src/plugins/discover-plugins.ts:53
+        snippet: function mergeRules(rules: ProxyRule[]): ProxyRule {
+      - file: src/plugins/discover-plugins.ts
+        location: src/plugins/discover-plugins.ts:70
+        snippet: merged.onRequest = async (ctx) => { for (const fn of onRequests) await fn(ctx); };
+    prevalence: occasional
+
+  - category: testing
+    pattern: Current tests anchor host-based resolution and response-pipeline behavior
+    description: Existing tests verify exact host resolution and full response-pipeline operation, but do not cover URL-based matching or global rule composition.
+    examples:
+      - file: tests/plugins.test.ts
+        location: tests/plugins.test.ts:89
+        snippet: describe("PluginRegistry.resolve", () => {
+      - file: tests/response-pipeline.test.ts
+        location: tests/response-pipeline.test.ts:114
+        snippet: describe("response pipeline — live dummyjson.com", () => {
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: Plugin discovery
+      responsibility: Load rule modules from the active rules directory and construct in-memory plugin objects.
+      location: src/plugins/discover-plugins.ts
+      relationship_to_domain: domain depends on this
+    - component: Plugin registry
+      responsibility: Normalize hostnames and resolve the current rule snapshot for HTTP, CONNECT, and WebSocket flows.
+      location: src/plugins/plugin-registry.ts
+      relationship_to_domain: domain depends on this
+    - component: HTTP handler
+      responsibility: Main entry point for plain HTTP and decrypted HTTPS requests; decides target, buffering, and pipeline path.
+      location: src/proxy/http-handler.ts
+      relationship_to_domain: domain depends on this
+    - component: Response pipeline
+      responsibility: Isolated request-scoped proxy used when response-body mutation is enabled.
+      location: src/proxy/response-pipeline.ts
+      relationship_to_domain: domain depends on this
+    - component: CONNECT handler
+      responsibility: Selects interception vs passthrough and routes decrypted traffic back into HTTP handler.
+      location: src/proxy/connect-handler.ts
+      relationship_to_domain: this uses domain outputs
+    - component: WebSocket handler
+      responsibility: Resolves rule and fires WS open/close hooks on upgrades.
+      location: src/proxy/websocket-handler.ts
+      relationship_to_domain: this uses domain outputs
+  interfaces_used_by_domain:
+    - interface: ProxyRule
+      location: src/plugins/types.ts:154
+      usage_pattern: Single resolved rule object drives hook execution and target selection across transport paths.
+    - interface: RequestContext
+      location: src/plugins/types.ts:88
+      usage_pattern: Passed to `onRequest` after proxy request creation.
+    - interface: ResponseContext
+      location: src/plugins/types.ts:101
+      usage_pattern: Passed to `onResponse` once upstream response is available.
+    - interface: RequestBodyContext
+      location: src/plugins/types.ts:119
+      usage_pattern: Passed to `modifyRequestBody` after optional prebuffering.
+    - interface: ConnectContext
+      location: src/plugins/types.ts:134
+      usage_pattern: Passed to `onConnect` during CONNECT interception setup.
+  data_flow_involving_domain: Request arrives -> host/authority extracted and normalized -> registry resolves host rule -> HTTP handler computes target and optional prebuffering -> request enters shared-proxy or isolated response-pipeline path -> transport-specific hooks run -> response returns to client. For CONNECT interception, decrypted requests re-enter `handleHttpRequest()` with relative URLs and injected Host header.
+  key_relationships_to_domain:
+    - from: src/commands/serve.ts
+      to: src/plugins/plugin-registry.ts
+      relationship: imports
+    - from: src/commands/serve.ts
+      to: src/proxy/http-handler.ts
+      relationship: imports
+    - from: src/proxy/connect-handler.ts
+      to: src/proxy/http-handler.ts
+      relationship: calls
+    - from: src/proxy/http-handler.ts
+      to: src/proxy/response-pipeline.ts
+      relationship: calls
+    - from: src/proxy/http-handler.ts
+      to: src/plugins/plugin-registry.ts
+      relationship: calls
+    - from: src/proxy/websocket-handler.ts
+      to: src/plugins/plugin-registry.ts
+      relationship: calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - TypeScript
+  frameworks_used_in_domain:
+    - name: Node.js HTTP/TLS stack
+      usage_in_domain: Incoming proxy requests, CONNECT MITM handling, and socket-level request flow.
+  libraries_used_in_domain:
+    - name: http-proxy
+      purpose_in_domain: Shared and isolated upstream proxying for HTTP and WebSocket requests.
+    - name: chokidar
+      purpose_in_domain: Hot-reload watcher for rule discovery updates.
+    - name: vitest
+      purpose_in_domain: Unit and integration testing around registry and pipeline behavior.
+  external_apis_used_in_domain:
+    - name: dummyjson.com
+      integration_point: Live integration coverage in `tests/response-pipeline.test.ts`.
+
+related_conventions:
+  naming_patterns_in_domain: Transport handlers are named by protocol phase (`handleHttpRequest`, `handleConnect`, `handleWebSocketUpgrade`); rule hooks are named by lifecycle phase (`onRequest`, `onResponse`, `modifyResponseBody`, `onConnect`).
+  structure_of_domain: Host-based resolution happens first, then request handling branches by transport/proxy mode; helper utilities for reconstructing or serializing requests live under `src/plugins`.
+  error_handling_in_domain: Hook failures are logged and generally do not abort the request unless transport setup itself fails; proxy errors return 502 when possible.
+  testing_in_domain: Tests currently emphasize exact host resolution and end-to-end response-pipeline behavior rather than combinatorial rule-merging semantics.
+  documentation_in_domain: README and inline JSDoc describe hook contracts and request/response lifecycle; `AGENTS.md` documents response-context helpers.
+
+related_dependencies:
+  internal:
+    - component: src/plugins/plugin-registry.ts
+      relationship_to_domain: resolves host-scoped rules for all transport handlers
+      direction: outbound
+    - component: src/plugins/discover-plugins.ts
+      relationship_to_domain: constructs merged rule objects consumed by the registry
+      direction: outbound
+    - component: src/plugins/context-helpers.ts
+      relationship_to_domain: reconstructs request URL semantics and provides response-context helpers
+      direction: outbound
+    - component: src/proxy/response-pipeline.ts
+      relationship_to_domain: handles isolated mutation path selected by HTTP handler
+      direction: outbound
+    - component: src/proxy/connect-handler.ts
+      relationship_to_domain: feeds decrypted HTTPS requests back into HTTP handler
+      direction: inbound
+    - component: src/proxy/websocket-handler.ts
+      relationship_to_domain: parallel transport path using the same registry
+      direction: bidirectional
+  external:
+    - name: http-proxy
+      purpose_for_domain: proxy request/response and WebSocket forwarding
+    - name: Node core http/tls/net
+      purpose_for_domain: raw request parsing, TLS interception, and socket plumbing
+
+domain_security_considerations:
+  sensitive_areas:
+    - area: CONNECT MITM interception
+      location: src/proxy/connect-handler.ts
+      concern: HTTPS requests can arrive as decrypted relative-path HTTP requests after tunnel interception; URL matching semantics differ from plain forward-proxy absolute URIs.
+    - area: Host-header-derived URL reconstruction
+      location: src/plugins/context-helpers.ts:10
+      concern: Absolute URL reconstruction depends on Host header and socket encryption state.
+    - area: Hook short-circuit responses
+      location: src/proxy/http-handler.ts:115 and src/proxy/response-pipeline.ts:123
+      concern: `onRequest` can terminate upstream forwarding by returning a `StaticResponse`.
+  authentication_patterns_in_domain: No explicit authentication/authorization layer is present in this domain; matching and routing rely on incoming host/URL data.
+  authorization_patterns_in_domain: No separate authorization mechanism observed in the request/response pipeline.
+  data_validation_in_domain: Minimal validation is present; host normalization strips ports and ignored subdomains, but request URL matching logic does not yet exist.
+
+testing_patterns:
+  framework: Vitest
+  coverage_areas:
+    - plugin discovery and exact host registry resolution
+    - isolated response-pipeline passthrough behavior
+    - isolated response-pipeline body mutation behavior
+  test_organization: Unit-style registry/discovery tests in `tests/plugins.test.ts` and live integration tests for HTTP pipeline in `tests/response-pipeline.test.ts`.
+  mock_patterns:
+    - Temporary on-disk rule fixtures for discovery/reload tests
+    - Live local proxy server wrapping actual handlers for end-to-end pipeline tests
+
+request_matching_analysis:
+  relevant_files_and_symbols:
+    request_handling:
+      - file: src/proxy/http-handler.ts
+        symbols:
+          - handleHttpRequest
+          - registry.resolve
+          - rule.resolveTarget
+          - rule.onRequest
+          - rule.modifyRequestBody
+          - rule.onResponse
+      - file: src/proxy/connect-handler.ts
+        symbols:
+          - handleConnect
+          - shouldInterceptConnect
+          - rule.onConnect
+      - file: src/proxy/websocket-handler.ts
+        symbols:
+          - handleWebSocketUpgrade
+          - rule.onWebSocketOpen
+          - rule.onWebSocketClose
+    response_pipeline:
+      - file: src/proxy/response-pipeline.ts
+        symbols:
+          - runResponsePipeline
+          - bufferIncomingBody
+          - rule.onRequest
+          - rule.modifyRequestBody
+          - rule.modifyResponseBody
+          - rule.onResponse
+    plugin_invocation_and_composition:
+      - file: src/plugins/plugin-registry.ts
+        symbols:
+          - PluginRegistry.resolve
+          - normalizeHostname
+          - extractHostname
+      - file: src/plugins/discover-plugins.ts
+        symbols:
+          - discoverPlugins
+          - loadDomainFolder
+          - mergeRules
+      - file: src/plugins/types.ts
+        symbols:
+          - ProxyRule
+          - RequestContext
+          - ResponseContext
+          - RequestBodyContext
+          - ConnectContext
+
+  request_context_available_for_match:
+    available_before_hooks:
+      - req: original `http.IncomingMessage`
+      - req_url: raw `req.url`, which may be absolute on plain forward-proxy HTTP and relative after CONNECT decryption
+      - host_header: `req.headers.host`
+      - domain: normalized hostname derived from host/authority using `extractHostname()` + `normalizeHostname()`
+      - transport_hint: `(req.socket as { encrypted?: boolean }).encrypted` is already used by `buildReqUrl()` to infer scheme
+    existing_absolute_url_logic:
+      location: src/plugins/context-helpers.ts:10
+      note: `buildReqUrl()` reconstructs an absolute URL from relative requests using host header and transport scheme; this is the closest existing URL-normalization logic for match evaluation.
+    context_limitations:
+      - `proxyReq` does not exist yet at the earliest HTTP match point.
+      - `proxyRes` does not exist before upstream response handling.
+      - CONNECT matching currently has `authority`/`hostname` at tunnel time, not a full decrypted request URL.
+
+  safe_insertion_points_before_normal_hooks:
+    preferred_http_insertion_point:
+      location: src/proxy/http-handler.ts, after lines 38-41 and before line 50
+      reason: At this point `rawHost`, `hostname`, `domain`, and the resolved host rule are known, while `resolveTarget`, request-body prebuffering, response-pipeline branching, and proxy event listener registration have not yet run.
+      guarded_behaviors_if_inserted_here:
+        - resolveTarget
+        - modifyRequestBody prebuffering decisions
+        - shared-path onRequest/onResponse hook registration
+        - pipeline-path onRequest/modifyRequestBody/modifyResponseBody/onResponse execution
+    secondary_http_insertion_point:
+      location: src/proxy/http-handler.ts, immediately before the `if (rule?.modifyResponseBody)` branch at line 105
+      reason: Still prevents both HTTP hook paths from running, but occurs after `resolveTarget` and any request-body prebuffering, so it is later than necessary.
+    less_safe_duplication_point:
+      location: src/proxy/response-pipeline.ts, function entry before `proxy.once("proxyReq", ...)`
+      reason: Would gate the isolated pipeline path, but would duplicate HTTP matching logic and would not cover shared-path hook execution or earlier `resolveTarget` work.
+    non_http_paths:
+      - CONNECT: host rule resolution happens in `handleConnect()` before `onConnect`; there is no full request URL yet.
+      - WebSocket: host rule resolution happens in `handleWebSocketUpgrade()` before WS hooks; request URL exists for upgrade requests but current path is host-only and separate from HTTP hook flow.
+
+  likely_type_interface_changes:
+    rule_contract:
+      - `ProxyRule` would need a new match-related field to represent string, `RegExp`, sync function, or async function forms.
+      - A dedicated request-match context type would likely be needed because existing `RequestContext` requires `proxyReq`, which is unavailable at the earliest safe HTTP insertion point.
+    discovery_registry_shapes:
+      - `DiscoveredPlugin` and/or registry storage would likely need to distinguish host-scoped plugins from global URL-matched plugins, because current discovery maps folder/file name directly to `domain` and current registry only resolves exact host strings.
+      - A request-aware resolution API would likely be needed in addition to or instead of `resolve(rawHost)` for HTTP request handling.
+    composition_surface:
+      - Any combined result for host rule + matched globals would likely need to flow into both `handleHttpRequest()` and `runResponsePipeline()` as one effective rule object to avoid divergent hook behavior.
+
+  risks_and_edge_cases:
+    - risk: `rules/global` is currently just another folder name to discovery logic; without special handling it would load as domain `global`, not as a special URL-matched rule namespace.
+      evidence: src/plugins/discover-plugins.ts:145 scans each top-level folder/file and assigns `domain = entry`.
+    - risk: `PluginRegistry.resolve()` only accepts a raw host/authority string and cannot evaluate URL-based request matchers.
+      evidence: src/plugins/plugin-registry.ts:69.
+    - risk: `mergeRules()` composes `onRequest` but discards each hook's return value, so `StaticResponse` short-circuit behavior would be lost if global and domain rules are combined through current composition logic.
+      evidence: src/plugins/discover-plugins.ts:70-72 only await each function and return nothing.
+    - risk: `mergeRules()` does not merge `resolveTarget` or `modifyRequestBody`, so using existing folder-composition semantics for global+domain layering would omit those behaviors.
+      evidence: src/plugins/discover-plugins.ts:53-109 only merges target, priority, logging, selected hooks, and `modifyResponseBody`.
+    - risk: Request URL form differs by transport path; plain HTTP may already be absolute, while HTTPS MITM re-enters `handleHttpRequest()` with relative paths and injected host header.
+      evidence: src/proxy/http-handler.ts:25-26 and src/proxy/connect-handler.ts:105-106.
+    - risk: Matching after `resolveTarget` or prebuffering would allow non-matched global rules to still influence performance or routing decisions.
+    - risk: CONNECT and WebSocket paths have separate hook entry points and different available context, so HTTP URL-based matching semantics may not transfer directly.
+
+open_questions:
+  - question: What is the exact string-match semantic for the new `match` form?
+    context: The objective requires string support, but the current codebase has no URL matcher precedent indicating exact, prefix, substring, or glob-style behavior.
+  - question: Should global rules participate only in HTTP/HTTPS request hooks, or also in CONNECT and WebSocket lifecycle hooks?
+    context: Current CONNECT and WebSocket flows resolve rules independently and do not have the same request URL semantics as HTTP hooks.
+  - question: What ordering should apply when both a host rule and one or more global rules match?
+    context: Current registry ordering is priority-based for exact host resolution, while folder composition order is alphabetical with `index.*` first.
+  - question: Should match evaluation use the raw `req.url` or a reconstructed absolute URL?
+    context: Decrypted CONNECT requests can have relative paths, while the objective describes matching against the request URL.
+
+gaps:
+  - area: Global rule namespace behavior
+    description: No existing code or tests describe how `rules/global` should be discovered, loaded, or ordered relative to host-specific rules.
+    impact: Discovery and composition semantics for the feature remain undefined in the current codebase.
+  - area: Rule composition return semantics
+    description: Existing tests do not cover composed `onRequest` hooks returning `StaticResponse`, nor composition of `resolveTarget` / `modifyRequestBody`.
+    impact: Combining global and host rules through current merge utilities has unverified and potentially incorrect behavior.
+  - area: Transport-specific URL matching expectations
+    description: There are no tests or docs specifying whether URL matching should be absolute, relative, normalized, or protocol-aware across HTTP, HTTPS MITM, and WebSocket upgrades.
+    impact: Matching semantics could diverge across request paths unless explicitly defined.

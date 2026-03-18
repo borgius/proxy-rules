@@ -1,0 +1,554 @@
+plan_id: 20260318-global-rules
+objective: add support for global rules stored in rules/global that run for every request if a match passes
+focus_area: current rule discovery/loading and how per-domain rules are resolved
+created_at: 2026-03-18
+created_by: GitHub Copilot (GPT-5.4)
+status: completed
+
+tldr: |
+  - Rule discovery is centralized in `src/plugins/discover-plugins.ts`: it scans the active `rulesDir`, imports either domain folders or top-level rule files, and merges multi-file domain folders into a single `ProxyRule`.
+  - Domain resolution is centralized in `src/plugins/plugin-registry.ts`: requests are normalized via `extractHostname()` + `normalizeHostname()`, then a single `ProxyRule | null` is returned to HTTP, CONNECT, and WebSocket handlers.
+  - The narrowest seam for adding `rules/global` with minimal surface-area change is the discovery/registry boundary: preserve handler call sites by keeping `registry.resolve(...)` as the place that yields the effective rule object.
+  - Hook composition already has established semantics that must be preserved: ordered async hook chaining, `modifyResponseBody` last-wins during merge, `onRequest` short-circuit via `StaticResponse`, and `resolveTarget` before opening the upstream connection.
+  - Existing tests already lock loader, resolver, hot-reload, config-path, CONNECT interception, and response-pipeline behavior; global-rule support would most naturally extend those suites rather than require brand-new harnesses.
+
+research_metadata:
+  methodology: hybrid retrieval using semantic_search, grep_search, direct file reads, symbol-usage lookup, and targeted metadata collection for key loader/resolver/runtime files
+  scope: focused on rule discovery, registry construction, hostname normalization, runtime rule selection for HTTP/CONNECT/WebSocket, hot reload, and adjacent tests/docs
+  confidence: high
+  coverage: 92
+
+files_analyzed:
+  - file: discover-plugins.ts
+    path: /Users/admin/dev/proxy-rules/src/plugins/discover-plugins.ts
+    purpose: Scans the rules directory, imports rule modules, and merges per-domain multi-file rules into one runtime rule object.
+    key_elements:
+      - element: DiscoveredPlugin
+        type: interface
+        location: src/plugins/discover-plugins.ts:8
+        description: Loader output shape consumed by the registry (`domain` + `rule`).
+      - element: importRule
+        type: function
+        location: src/plugins/discover-plugins.ts:22
+        description: Cache-busting dynamic import that copies each rule file to a temp file before importing.
+      - element: mergeRules
+        type: function
+        location: src/plugins/discover-plugins.ts:53
+        description: Defines merge semantics for multiple rule modules in one domain folder.
+      - element: loadDomainFolder
+        type: function
+        location: src/plugins/discover-plugins.ts:120
+        description: Loads `index.*` first, then remaining files alphabetically, and merges them.
+      - element: discoverPlugins
+        type: function
+        location: src/plugins/discover-plugins.ts:145
+        description: Enumerates `rulesDir` entries and returns discovered domain rules.
+    language: TypeScript
+    lines: 177
+
+  - file: plugin-registry.ts
+    path: /Users/admin/dev/proxy-rules/src/plugins/plugin-registry.ts
+    purpose: Normalizes hostnames, stores discovered rules, and resolves the active rule for a request.
+    key_elements:
+      - element: normalizeHostname
+        type: function
+        location: src/plugins/plugin-registry.ts:14
+        description: Strips configured ignored subdomains such as `www`.
+      - element: extractHostname
+        type: function
+        location: src/plugins/plugin-registry.ts:31
+        description: Removes ports from Host/authority strings, including IPv6 bracketed literals.
+      - element: PluginRegistry.replace
+        type: function
+        location: src/plugins/plugin-registry.ts:57
+        description: Atomically replaces all registry entries and sorts them by rule priority descending.
+      - element: PluginRegistry.resolve
+        type: function
+        location: src/plugins/plugin-registry.ts:69
+        description: Returns one `ProxyRule | null` after trying normalized and original host candidates.
+      - element: buildRegistry
+        type: function
+        location: src/plugins/plugin-registry.ts:96
+        description: Creates the registry from the active rules directory and ignore-subdomain config.
+    language: TypeScript
+    lines: 107
+
+  - file: types.ts
+    path: /Users/admin/dev/proxy-rules/src/plugins/types.ts
+    purpose: Declares the public rule contract and all hook context types.
+    key_elements:
+      - element: RequestContext
+        type: interface
+        location: src/plugins/types.ts:88
+        description: Context passed to `onRequest`.
+      - element: ResponseContext
+        type: interface
+        location: src/plugins/types.ts:101
+        description: Context passed to `onResponse`.
+      - element: BodyContext
+        type: interface
+        location: src/plugins/types.ts:114
+        description: Context passed to `modifyResponseBody`, extending response context with `contentType`.
+      - element: ConnectContext
+        type: interface
+        location: src/plugins/types.ts:134
+        description: Context passed to `onConnect`.
+      - element: ProxyRule
+        type: interface
+        location: src/plugins/types.ts:154
+        description: Public plugin contract used by all discovery and runtime code.
+      - element: onRequest / onResponse / modifyResponseBody / onConnect / onWebSocketOpen / onWebSocketClose
+        type: pattern
+        location: src/plugins/types.ts:192-249
+        description: Established lifecycle hooks that current runtime code expects.
+    language: TypeScript
+    lines: 250
+
+  - file: serve.ts
+    path: /Users/admin/dev/proxy-rules/src/commands/serve.ts
+    purpose: Startup path that loads config, builds the registry, enables hot reload, and wires request handlers.
+    key_elements:
+      - element: registerServeCommand
+        type: function
+        location: src/commands/serve.ts:15
+        description: CLI entry point that resolves `paths.rulesDir`, builds the registry, and starts the proxy server.
+      - element: buildRegistry call
+        type: usage
+        location: src/commands/serve.ts:57
+        description: Current single place where runtime registry is first created from the rules directory.
+      - element: watchRules call
+        type: usage
+        location: src/commands/serve.ts:61
+        description: Hot-reload path that reuses the same rules directory.
+    language: TypeScript
+    lines: 129
+
+  - file: load-config.ts
+    path: /Users/admin/dev/proxy-rules/src/config/load-config.ts
+    purpose: Resolves active config roots and the active rules directory before discovery starts.
+    key_elements:
+      - element: resolvePaths
+        type: function
+        location: src/config/load-config.ts:41
+        description: Derives `rulesDir`, cert paths, and log paths.
+      - element: loadConfig
+        type: function
+        location: src/config/load-config.ts:176
+        description: Merges global/project config and computes `paths.rulesDir`.
+      - element: project rules fallback
+        type: pattern
+        location: src/config/load-config.ts:211
+        description: Defaults rules to `<git-root>/.proxy-rules/rules` when present, otherwise global config dir rules.
+    language: TypeScript
+    lines: 223
+
+  - file: http-handler.ts
+    path: /Users/admin/dev/proxy-rules/src/proxy/http-handler.ts
+    purpose: Resolves the rule for an HTTP request and applies request/response hooks.
+    key_elements:
+      - element: handleHttpRequest
+        type: function
+        location: src/proxy/http-handler.ts:28
+        description: Main HTTP runtime entry point.
+      - element: registry.resolve(rawHost)
+        type: usage
+        location: src/proxy/http-handler.ts:41
+        description: Fetches the effective per-request rule based on the Host header.
+      - element: modifyResponseBody pipeline branch
+        type: pattern
+        location: src/proxy/http-handler.ts:105
+        description: Sends body-mutating rules through the isolated response pipeline.
+      - element: onProxyReq
+        type: function
+        location: src/proxy/http-handler.ts:112
+        description: Executes `onRequest` and optional `modifyRequestBody` before forwarding.
+      - element: onProxyRes
+        type: function
+        location: src/proxy/http-handler.ts:171
+        description: Executes `onResponse` for non-pipeline requests.
+    language: TypeScript
+    lines: 199
+
+  - file: response-pipeline.ts
+    path: /Users/admin/dev/proxy-rules/src/proxy/response-pipeline.ts
+    purpose: Request-scoped proxy path used when a rule mutates response bodies.
+    key_elements:
+      - element: runResponsePipeline
+        type: function
+        location: src/proxy/response-pipeline.ts:69
+        description: Isolated self-handle-response path for `modifyResponseBody` rules.
+      - element: proxyReq hook execution
+        type: pattern
+        location: src/proxy/response-pipeline.ts:106-158
+        description: Replays `onRequest`, static-response short-circuit, and `modifyRequestBody` in pipeline mode.
+      - element: proxyRes body mutation and onResponse ordering
+        type: pattern
+        location: src/proxy/response-pipeline.ts:228-253
+        description: Calls `modifyResponseBody`, then `onResponse`, then writes final body/headers.
+    language: TypeScript
+    lines: 286
+
+  - file: connect-handler.ts
+    path: /Users/admin/dev/proxy-rules/src/proxy/connect-handler.ts
+    purpose: Uses registry lookup to decide whether HTTPS CONNECT traffic is intercepted or passed through.
+    key_elements:
+      - element: shouldInterceptConnect
+        type: function
+        location: src/proxy/connect-handler.ts:48
+        description: Boolean pre-check based on registry resolution.
+      - element: handleConnect
+        type: function
+        location: src/proxy/connect-handler.ts:298
+        description: Main CONNECT runtime path.
+      - element: registry.resolve(hostname)
+        type: usage
+        location: src/proxy/connect-handler.ts:316
+        description: Determines whether any rule exists for the requested hostname.
+      - element: onConnect invocation
+        type: usage
+        location: src/proxy/connect-handler.ts:329
+        description: Runs the rule’s connection hook before MITM setup.
+    language: TypeScript
+    lines: 362
+
+  - file: websocket-handler.ts
+    path: /Users/admin/dev/proxy-rules/src/proxy/websocket-handler.ts
+    purpose: Resolves a rule for WebSocket upgrades and invokes WebSocket-specific hooks.
+    key_elements:
+      - element: handleWebSocketUpgrade
+        type: function
+        location: src/proxy/websocket-handler.ts:14
+        description: Main WebSocket runtime entry point.
+      - element: registry.resolve(rawHost)
+        type: usage
+        location: src/proxy/websocket-handler.ts:27
+        description: Selects the rule that controls target rewriting and hooks.
+      - element: onWebSocketOpen / onWebSocketClose
+        type: usage
+        location: src/proxy/websocket-handler.ts:41-51
+        description: WebSocket hook invocation points.
+    language: TypeScript
+    lines: 56
+
+  - file: watch-config-and-rules.ts
+    path: /Users/admin/dev/proxy-rules/src/watch/watch-config-and-rules.ts
+    purpose: Hot-reload loop for rule changes.
+    key_elements:
+      - element: watchRules
+        type: function
+        location: src/watch/watch-config-and-rules.ts:15
+        description: Watches the active rules directory and reloads the registry atomically.
+      - element: discoverPlugins + registry.replace
+        type: pattern
+        location: src/watch/watch-config-and-rules.ts:27-28
+        description: Reuses the same discovery/replace path as initial startup.
+    language: TypeScript
+    lines: 57
+
+  - file: plugins.test.ts
+    path: /Users/admin/dev/proxy-rules/tests/plugins.test.ts
+    purpose: Covers plugin discovery, module reloading, and registry resolution behavior.
+    key_elements:
+      - element: discoverPlugins suite
+        type: test
+        location: tests/plugins.test.ts:24
+        description: Verifies domain discovery and module reload behavior.
+      - element: PluginRegistry.resolve suite
+        type: test
+        location: tests/plugins.test.ts:87
+        description: Verifies exact, port-stripped, normalized, and missing-domain resolution.
+      - element: PluginRegistry.replace suite
+        type: test
+        location: tests/plugins.test.ts:131
+        description: Verifies atomic replacement behavior during hot reload.
+    language: TypeScript
+    lines: 145
+
+  - file: watch-rules.test.ts
+    path: /Users/admin/dev/proxy-rules/tests/watch-rules.test.ts
+    purpose: Verifies hot reload updates the registry after rule file changes.
+    key_elements:
+      - element: watchRules suite
+        type: test
+        location: tests/watch-rules.test.ts:52
+        description: End-to-end watcher reload coverage over temp rule files.
+    language: TypeScript
+    lines: 87
+
+  - file: config.test.ts
+    path: /Users/admin/dev/proxy-rules/tests/config.test.ts
+    purpose: Verifies rulesDir resolution and CONNECT interception helpers.
+    key_elements:
+      - element: loadConfig rulesDir assertions
+        type: test
+        location: tests/config.test.ts:15-116
+        description: Covers fixture loading, merged config, and `--rules` override behavior.
+      - element: shouldInterceptConnect coverage
+        type: test
+        location: tests/config.test.ts:146
+        description: Shows CONNECT interception currently depends only on registry resolution.
+    language: TypeScript
+    lines: 162
+
+  - file: response-pipeline.test.ts
+    path: /Users/admin/dev/proxy-rules/tests/response-pipeline.test.ts
+    purpose: End-to-end coverage for `modifyResponseBody` pipeline behavior.
+    key_elements:
+      - element: withProxy helper
+        type: test-helper
+        location: tests/response-pipeline.test.ts:41
+        description: Builds a registry directly from an in-memory discovered rule list.
+      - element: passthrough body-modifier test
+        type: test
+        location: tests/response-pipeline.test.ts:105
+        description: Locks content-length and identity behavior.
+      - element: mutation test
+        type: test
+        location: tests/response-pipeline.test.ts:148
+        description: Locks JSON mutation and final content-length behavior.
+    language: TypeScript
+    lines: 209
+
+  - file: README.md
+    path: /Users/admin/dev/proxy-rules/README.md
+    purpose: Documents the public rule model and hostname-based matching behavior.
+    key_elements:
+      - element: Rule plugins docs
+        type: documentation
+        location: README.md:132
+        description: States that rules are matched by normalized hostname under the active rules directory.
+      - element: Request/response hooks docs
+        type: documentation
+        location: README.md:145
+        description: Public examples of `onRequest`, `onResponse`, `modifyResponseBody`, and logging.
+    language: Markdown
+    lines: 407
+
+patterns_found:
+  - category: structure
+    pattern: Rules are discovered from one active rules root and emitted as a flat list of domain-to-rule pairs.
+    description: `discoverPlugins()` treats each subdirectory as a domain and each top-level JS/TS file as a single-file domain rule; there is no special-case shared/global rule concept today.
+    examples:
+      - file: src/plugins/discover-plugins.ts
+        location: src/plugins/discover-plugins.ts:145-173
+        snippet: "discoverPlugins() iterates entries in rulesDir; directories become domains, top-level files become basename domains."
+      - file: README.md
+        location: README.md:132-145
+        snippet: "Rules are matched by normalising the requested hostname and looking up a matching folder under the active rules directory."
+    prevalence: common
+
+  - category: architecture
+    pattern: Runtime consumers depend on a single registry lookup that returns one effective `ProxyRule`.
+    description: HTTP, CONNECT, and WebSocket handlers do not perform their own file or folder resolution; they all ask `PluginRegistry.resolve(...)` for the active rule.
+    examples:
+      - file: src/proxy/http-handler.ts
+        location: src/proxy/http-handler.ts:41
+        snippet: "const rule = registry.resolve(rawHost);"
+      - file: src/proxy/connect-handler.ts
+        location: src/proxy/connect-handler.ts:316
+        snippet: "const rule = registry.resolve(hostname);"
+      - file: src/proxy/websocket-handler.ts
+        location: src/proxy/websocket-handler.ts:27
+        snippet: "const rule = registry.resolve(rawHost);"
+    prevalence: common
+
+  - category: architecture
+    pattern: Hook composition semantics are defined during discovery-time merge, not at request time.
+    description: Multi-file domain folders are merged once; scalar fields (`target`, `priority`) use last-wins, `logging` shallow-merges, async hooks chain in order, and `modifyResponseBody` uses last-wins semantics.
+    examples:
+      - file: src/plugins/discover-plugins.ts
+        location: src/plugins/discover-plugins.ts:53-105
+        snippet: "mergeRules() composes onRequest/onResponse/onConnect/onWebSocket* and lets the last modifyResponseBody win."
+      - file: src/plugins/discover-plugins.ts
+        location: src/plugins/discover-plugins.ts:120-138
+        snippet: "loadDomainFolder() loads index first, then alphabetical files, then merges them."
+    prevalence: common
+
+  - category: architecture
+    pattern: Response-body mutation uses a separate isolated proxy path with slightly different hook timing.
+    description: When `modifyResponseBody` exists, `handleHttpRequest()` delegates to `runResponsePipeline()`; in that path, `modifyResponseBody` runs before `onResponse`, whereas non-pipeline requests only run `onResponse` on upstream response arrival.
+    examples:
+      - file: src/proxy/http-handler.ts
+        location: src/proxy/http-handler.ts:105-108
+        snippet: "if (rule?.modifyResponseBody) { runResponsePipeline(...); return; }"
+      - file: src/proxy/response-pipeline.ts
+        location: src/proxy/response-pipeline.ts:228-253
+        snippet: "modifyResponseBody executes, then optional onResponse, then final response is written."
+    prevalence: occasional
+
+  - category: testing
+    pattern: Rule-loading behavior is verified with temporary rules directories and live registry replacement.
+    description: Tests already create temp rule trees, write `index.js`, reload discovery, and assert registry resolution/hot reload behavior.
+    examples:
+      - file: tests/plugins.test.ts
+        location: tests/plugins.test.ts:41-84
+        snippet: "write rule file, call discoverPlugins(), rewrite file, call discoverPlugins() again, assert updated module contents."
+      - file: tests/watch-rules.test.ts
+        location: tests/watch-rules.test.ts:52-85
+        snippet: "watchRules() reloads registry after the file changes without restart."
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: Config resolution
+      responsibility: Determines the active rules directory before discovery begins.
+      location: /Users/admin/dev/proxy-rules/src/config/load-config.ts
+      relationship_to_domain: domain rule loading depends on the resolved `paths.rulesDir`
+    - component: Plugin discovery
+      responsibility: Imports rule modules and produces discovered domain/rule pairs.
+      location: /Users/admin/dev/proxy-rules/src/plugins/discover-plugins.ts
+      relationship_to_domain: domain loading is implemented here
+    - component: Plugin registry
+      responsibility: Stores discovered rules and resolves the active rule for a hostname.
+      location: /Users/admin/dev/proxy-rules/src/plugins/plugin-registry.ts
+      relationship_to_domain: all runtime handlers depend on this single resolution layer
+    - component: HTTP handler
+      responsibility: Applies request/response hooks and target selection for HTTP traffic.
+      location: /Users/admin/dev/proxy-rules/src/proxy/http-handler.ts
+      relationship_to_domain: consumes the resolved rule for each HTTP request
+    - component: CONNECT handler
+      responsibility: Decides intercept vs passthrough and invokes connection hooks.
+      location: /Users/admin/dev/proxy-rules/src/proxy/connect-handler.ts
+      relationship_to_domain: depends on rule existence to intercept HTTPS tunnels
+    - component: WebSocket handler
+      responsibility: Applies rule-based WS target rewriting and WebSocket hooks.
+      location: /Users/admin/dev/proxy-rules/src/proxy/websocket-handler.ts
+      relationship_to_domain: consumes the resolved rule for upgrade requests
+    - component: Rule watcher
+      responsibility: Re-runs discovery and atomically swaps the registry after file changes.
+      location: /Users/admin/dev/proxy-rules/src/watch/watch-config-and-rules.ts
+      relationship_to_domain: keeps domain rules hot-reloaded
+  interfaces_used_by_domain:
+    - interface: DiscoveredPlugin
+      location: src/plugins/discover-plugins.ts:8
+      usage_pattern: Loader emits a flat array consumed by `PluginRegistry.replace()`.
+    - interface: ProxyRule
+      location: src/plugins/types.ts:154
+      usage_pattern: Shared contract spanning discovery, registry storage, and runtime hook execution.
+    - interface: RequestContext / ResponseContext / BodyContext / ConnectContext
+      location: src/plugins/types.ts:88-134
+      usage_pattern: Hook contexts passed to rule callbacks in runtime handlers.
+  data_flow_involving_domain: |
+    `serve.ts` calls `loadConfig()` to compute `paths.rulesDir`, then `buildRegistry()` calls `discoverPlugins()` and seeds `PluginRegistry` with discovered domain rules. At runtime, `handleHttpRequest()`, `handleConnect()`, and `handleWebSocketUpgrade()` normalize the incoming host/authority and call `registry.resolve(...)` to obtain the active `ProxyRule`. That resolved rule controls target selection (`target` / `resolveTarget`) and lifecycle hooks (`onRequest`, `modifyRequestBody`, `modifyResponseBody`, `onResponse`, `onConnect`, `onWebSocket*`). When hot reload is enabled, `watchRules()` re-runs the same discovery path and atomically swaps the registry contents.
+  key_relationships_to_domain:
+    - from: src/commands/serve.ts
+      to: src/config/load-config.ts
+      relationship: calls
+    - from: src/commands/serve.ts
+      to: src/plugins/plugin-registry.ts
+      relationship: calls
+    - from: src/plugins/plugin-registry.ts
+      to: src/plugins/discover-plugins.ts
+      relationship: calls
+    - from: src/watch/watch-config-and-rules.ts
+      to: src/plugins/discover-plugins.ts
+      relationship: calls
+    - from: src/proxy/http-handler.ts
+      to: src/plugins/plugin-registry.ts
+      relationship: calls
+    - from: src/proxy/connect-handler.ts
+      to: src/plugins/plugin-registry.ts
+      relationship: calls
+    - from: src/proxy/websocket-handler.ts
+      to: src/plugins/plugin-registry.ts
+      relationship: calls
+    - from: src/proxy/http-handler.ts
+      to: src/proxy/response-pipeline.ts
+      relationship: calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - TypeScript
+    - JavaScript
+    - Markdown
+  frameworks_used_in_domain:
+    - name: Commander
+      usage_in_domain: CLI wiring for `serve` startup options.
+    - name: Chokidar
+      usage_in_domain: Watches the rules directory for hot reload.
+    - name: Vitest
+      usage_in_domain: Test framework for discovery, registry, config, and runtime tests.
+  libraries_used_in_domain:
+    - name: http-proxy
+      purpose_in_domain: Shared proxy engine and isolated response pipeline proxying.
+    - name: node:fs / node:fs/promises
+      purpose_in_domain: Rule directory scanning, temp file imports, test fixture creation, and watcher tests.
+    - name: node:path / node:url / node:os
+      purpose_in_domain: Path resolution and temp-file import paths during rule loading.
+  external_apis_used_in_domain:
+    - name: dummyjson.com
+      integration_point: Used only by `tests/response-pipeline.test.ts` for live integration coverage.
+
+related_conventions:
+  naming_patterns_in_domain: Domain folders are named by hostname (for example `api.example.com`), top-level rule files use the basename as the domain, and runtime code consistently uses `rule` for the resolved `ProxyRule`.
+  structure_of_domain: One resolved rules root feeds discovery; discovered rules become a flat registry; runtime handlers perform a single lookup and then execute hook-specific paths.
+  error_handling_in_domain: Loader/import/hook errors are logged and generally downgraded to skip/fallback behavior rather than crashing the process.
+  testing_in_domain: Tests prefer temporary on-disk rules directories for loader/watch behavior and direct in-memory registry seeding for runtime pipeline behavior.
+  documentation_in_domain: README documents hostname-based folder matching and the public `ProxyRule` hook contract.
+
+related_dependencies:
+  internal:
+    - component: src/config/load-config.ts
+      relationship_to_domain: Supplies the active rules root consumed by discovery and startup.
+      direction: inbound
+    - component: src/plugins/discover-plugins.ts
+      relationship_to_domain: Produces registry input.
+      direction: inbound
+    - component: src/plugins/types.ts
+      relationship_to_domain: Defines the loader/runtime rule contract.
+      direction: bidirectional
+    - component: src/proxy/http-handler.ts
+      relationship_to_domain: Executes resolved rule hooks for HTTP traffic.
+      direction: outbound
+    - component: src/proxy/connect-handler.ts
+      relationship_to_domain: Uses resolution to decide CONNECT interception and connection hooks.
+      direction: outbound
+    - component: src/proxy/websocket-handler.ts
+      relationship_to_domain: Uses resolution to decide WS behavior and hooks.
+      direction: outbound
+    - component: src/watch/watch-config-and-rules.ts
+      relationship_to_domain: Reuses discovery + replace for hot reload.
+      direction: bidirectional
+  external:
+    - name: http-proxy
+      purpose_for_domain: Transport/proxy abstraction for HTTP and WebSocket forwarding.
+    - name: chokidar
+      purpose_for_domain: File watching for automatic registry reload.
+    - name: vitest
+      purpose_for_domain: Test harness covering discovery and resolution behavior.
+
+testing_patterns:
+  framework: Vitest
+  coverage_areas:
+    - discovery of domain folders and single-file rules
+    - registry normalization and port stripping
+    - atomic registry replacement during hot reload
+    - rules directory path resolution from config and CLI overrides
+    - CONNECT interception based on registry hits
+    - response pipeline behavior when `modifyResponseBody` is present
+  test_organization: Loader/registry tests live in `tests/plugins.test.ts`, low-level normalization in `tests/plugin-registry.test.ts`, config/rules path and CONNECT helpers in `tests/config.test.ts`, watcher reload in `tests/watch-rules.test.ts`, and response-body runtime behavior in `tests/response-pipeline.test.ts`.
+  mock_patterns:
+    - Temporary rules directories with generated `index.js` files
+    - Direct `registry.replace([{ domain, rule }])` setup for focused runtime tests
+    - Live upstream integration for response-pipeline assertions
+
+open_questions:
+  - question: What precedence should apply when both a global rule and a domain rule define the same scalar field or hook?
+    context: Current merge semantics only describe composition within a single domain folder; there is no existing cross-scope merge policy.
+  - question: Should `rules/global` behave as a reserved directory name or as a normal domain entry that is specially handled during discovery?
+    context: `discoverPlugins()` currently treats every directory in `rulesDir` as a routable domain name.
+  - question: Should CONNECT interception become true when only a global rule exists but no domain-specific rule matches?
+    context: `shouldInterceptConnect()` and `handleConnect()` currently treat interception strictly as `registry.resolve(hostname) !== null`.
+  - question: Should global hooks run for WebSocket and CONNECT traffic as well as HTTP requests?
+    context: The runtime has separate hook families (`onConnect`, `onWebSocketOpen`, `onWebSocketClose`) with distinct call sites.
+
+gaps:
+  - area: Global/shared rule model
+    description: The current codebase has no built-in concept of a non-domain-scoped rule stored under `rules/global`.
+    impact: Any global-rule design will need new semantics at discovery and/or registry resolution time.
+  - area: Cross-scope hook ordering coverage
+    description: Existing tests cover multi-file intra-domain merging and runtime hooks, but not layered execution across two scopes such as global + domain.
+    impact: Hook precedence/order for a global-rule feature is not established by current tests.
+  - area: Public documentation for shared rule precedence
+    description: README documents only hostname-matched rule folders and single resolved rules.
+    impact: User-visible behavior for `rules/global` would need explicit documentation to avoid ambiguity.

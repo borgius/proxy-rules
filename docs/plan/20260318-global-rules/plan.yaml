@@ -1,0 +1,456 @@
+plan_id: 20260318-global-rules
+objective: Add support for HTTP-global rules stored in `rules/global` that are evaluated for every request and run alongside existing per-domain rules when their matcher passes.
+created_at: 2026-03-18T00:00:00Z
+created_by: GitHub Copilot (GPT-5.4) / gem-planner
+status: pending_approval
+research_confidence: high
+
+tldr: |
+  Current state: rule discovery and runtime selection are domain-only. `discoverPlugins()` loads `rules/<domain>` entries, `PluginRegistry.resolve()` returns one synchronous hostname match, and HTTP request handling runs hooks from that single rule.
+  Target state: `rules/global` becomes a dedicated namespace of HTTP-global rules. For each HTTP request, the runtime reconstructs the request URL, evaluates global matchers (string, RegExp, sync function, async function), composes every matched global rule with the existing per-domain rule, and executes the combined hooks without regressing current domain-only, CONNECT, WebSocket, or hot-reload behavior.
+  Rollback posture: keep the existing synchronous domain resolver intact for non-HTTP callers and isolate new global discovery/composition behind dedicated APIs so the feature can be reverted by removing the HTTP-global path without disturbing host-only behavior.
+
+open_questions:
+  - Confirm the final precedence rule for conflicting `target`, `resolveTarget`, and body modifiers; this plan assumes matched globals run first and the domain rule runs last so domain-specific behavior stays most authoritative.
+  - Confirm whether a global rule without `match` should apply to every HTTP request; this plan assumes yes because the matcher is optional (`may define`).
+  - Confirm the exact supported layout inside `rules/global`; this plan assumes each immediate child file or child folder represents one global rule.
+
+pre_mortem:
+  overall_risk_level: medium
+  critical_failure_modes:
+    - scenario: Cross-rule composition changes `onRequest` semantics and drops a returned `StaticResponse` or runs later hooks after a short-circuit.
+      likelihood: medium
+      impact: critical
+      mitigation: Introduce a dedicated effective-rule composer for runtime composition, add explicit static-response regression tests, and avoid reusing the current loader-time `mergeRules()` for cross-rule chaining.
+    - scenario: Async global matching leaks into CONNECT/WebSocket paths and forces broad async API churn or breaks interception decisions.
+      likelihood: low
+      impact: high
+      mitigation: Keep `PluginRegistry.resolve(rawHost)` unchanged for domain-only consumers and add a separate async HTTP-only resolution method.
+    - scenario: `rules/global` hot reload or discovery ordering is nondeterministic, causing flaky behavior between reloads.
+      likelihood: medium
+      impact: medium
+      mitigation: Define deterministic ordering (priority first, then stable discovery order/name), extend watcher tests to include global-rule changes, and log both domain and global rule counts after reload.
+  assumptions:
+    - Global matching is in scope for HTTP request handling only; decrypted HTTPS traffic participates through the existing CONNECT -> HTTP path.
+    - Existing domain-folder merge semantics remain unchanged; richer multi-rule composition happens after discovery at HTTP request resolution time.
+    - The full request URL used for matcher evaluation should be reconstructed consistently for absolute-proxy requests and decrypted relative-path requests.
+    - Existing public rule authoring for `rules/<domain>` remains backward compatible.
+
+current_state: |
+  - Rules are discovered from the active rules directory by folder/file name, producing a single `ProxyRule` per domain.
+  - Hostname normalization and lookup live in `src/plugins/plugin-registry.ts`, and callers currently receive `ProxyRule | null` synchronously.
+  - `src/proxy/http-handler.ts` resolves one rule before `resolveTarget`, request-body buffering, and the response-pipeline split.
+  - `src/proxy/response-pipeline.ts` and the shared passthrough path assume the resolved rule already contains the complete hook set.
+  - Hot reload swaps the registry atomically by rediscovering all rules from disk.
+
+target_state: |
+  - `rules/global` is treated as a dedicated namespace of HTTP-global rules, each with an optional matcher.
+  - The registry exposes an async HTTP resolution/composition path that evaluates all global matchers against the reconstructed request URL and returns one effective rule for that request.
+  - Matched global hooks run together with the per-domain rule in a deterministic order across passthrough and response-pipeline flows.
+  - Host-only resolution for CONNECT and WebSocket remains intact unless a future requirement expands global behavior beyond HTTP.
+  - Tests and docs describe `rules/global`, matcher semantics, ordering, hot reload, and backward compatibility.
+
+affected_files_map:
+  - file: /Users/admin/dev/proxy-rules/src/plugins/types.ts
+    change_type: modify
+    purpose: Add matcher-related public types and document the new global-rule authoring surface.
+    dependencies: []
+  - file: /Users/admin/dev/proxy-rules/src/plugins/discover-plugins.ts
+    change_type: modify
+    purpose: Discover `rules/global` entries separately from domain rules with deterministic ordering.
+    dependencies: [/Users/admin/dev/proxy-rules/src/plugins/types.ts]
+  - file: /Users/admin/dev/proxy-rules/src/plugins/plugin-registry.ts
+    change_type: modify
+    purpose: Store domain and global rule collections and expose async HTTP-specific effective-rule resolution.
+    dependencies: [/Users/admin/dev/proxy-rules/src/plugins/discover-plugins.ts, /Users/admin/dev/proxy-rules/src/plugins/types.ts]
+  - file: /Users/admin/dev/proxy-rules/src/plugins/context-helpers.ts
+    change_type: modify_or_extract_helper
+    purpose: Reuse or expose request-URL reconstruction for matcher evaluation.
+    dependencies: []
+  - file: /Users/admin/dev/proxy-rules/src/proxy/http-handler.ts
+    change_type: modify
+    purpose: Await the effective HTTP rule before target resolution, buffering, and pipeline selection.
+    dependencies: [/Users/admin/dev/proxy-rules/src/plugins/plugin-registry.ts]
+  - file: /Users/admin/dev/proxy-rules/src/watch/watch-config-and-rules.ts
+    change_type: modify
+    purpose: Preserve atomic reload while surfacing updated registry/global counts if needed by the new registry shape.
+    dependencies: [/Users/admin/dev/proxy-rules/src/plugins/plugin-registry.ts]
+  - file: /Users/admin/dev/proxy-rules/tests/plugins.test.ts
+    change_type: modify
+    purpose: Cover global-rule discovery, matcher variants, and effective HTTP resolution semantics.
+    dependencies: [/Users/admin/dev/proxy-rules/src/plugins/discover-plugins.ts, /Users/admin/dev/proxy-rules/src/plugins/plugin-registry.ts]
+  - file: /Users/admin/dev/proxy-rules/tests/response-pipeline.test.ts
+    change_type: modify
+    purpose: Prove global + domain hook composition on live HTTP flows, including static-response and body-modifier interactions.
+    dependencies: [/Users/admin/dev/proxy-rules/src/proxy/http-handler.ts]
+  - file: /Users/admin/dev/proxy-rules/tests/watch-rules.test.ts
+    change_type: modify
+    purpose: Verify reload behavior when global rules are added, changed, or removed.
+    dependencies: [/Users/admin/dev/proxy-rules/src/watch/watch-config-and-rules.ts]
+  - file: /Users/admin/dev/proxy-rules/README.md
+    change_type: modify
+    purpose: Document `rules/global`, matcher variants, ordering, and HTTP-only scope.
+    dependencies: [/Users/admin/dev/proxy-rules/src/plugins/types.ts]
+  - file: /Users/admin/dev/proxy-rules/examples/README.md
+    change_type: modify
+    purpose: Explain how to use the new global example and when to prefer it over domain-only rules.
+    dependencies: [/Users/admin/dev/proxy-rules/README.md]
+  - file: /Users/admin/dev/proxy-rules/examples/rules/global/path-prefix.js
+    change_type: create
+    purpose: Runnable example showing a global rule that matches by URL pattern and coexists with domain rules.
+    dependencies: [/Users/admin/dev/proxy-rules/README.md]
+
+verification_by_wave:
+  - wave: 1
+    goal: Lock the public/global discovery contract before runtime integration.
+    steps:
+      - Extend or add discovery-focused assertions that `rules/global` is discovered separately and existing domain fixtures still resolve unchanged.
+      - Validate that the new matcher types surface cleanly in editor/type diagnostics.
+  - wave: 2
+    goal: Prove async HTTP resolution and composition semantics independent of the proxy runtime.
+    steps:
+      - Add unit-level coverage for string, RegExp, sync-function, async-function, and missing-match cases.
+      - Assert ordering/precedence for `target`, `resolveTarget`, `onRequest`, `modifyRequestBody`, and `modifyResponseBody` at the effective-rule layer.
+  - wave: 3
+    goal: Integrate without regressing existing passthrough vs. pipeline control flow.
+    steps:
+      - Run the HTTP integration suite and confirm requests with no matched globals behave identically to the current domain-only path.
+      - Confirm CONNECT/WebSocket tests or existing behavior remain on the synchronous host-only resolver.
+  - wave: 4
+    goal: Validate reload and end-to-end regression coverage.
+    steps:
+      - Run targeted watcher and response-pipeline tests with added global-rule fixtures.
+      - Re-run the plugin discovery/registry suite to confirm no flakiness after reload.
+  - wave: 5
+    goal: Ensure public-facing docs/examples match final behavior.
+    steps:
+      - Cross-check README and example text against the implemented matcher semantics and ordering rules.
+      - Verify example paths and filenames mirror the supported on-disk layout.
+
+rollback_notes:
+  - The safest rollback is to remove the async HTTP-global resolution path and restore `handleHttpRequest()` to `registry.resolve(rawHost)`, leaving CONNECT/WebSocket untouched.
+  - Keep loader-time domain composition (`mergeRules()`) unchanged so rollback does not need to unwind existing per-domain semantics.
+  - Avoid changing config-path resolution or watcher entry points beyond what is necessary for the new discovery payload so the feature can be reverted with a small patch set.
+
+implementation_specification:
+  code_structure: |
+    Preserve the current layering: discovery loads rule definitions from disk, the registry owns lookup/composition policy, and proxy handlers consume an already-resolved effective rule. Add HTTP-global support by extending discovery metadata and introducing a dedicated async HTTP resolver/composer instead of making every existing call site asynchronous.
+  affected_areas:
+    - src/plugins/types.ts
+    - src/plugins/discover-plugins.ts
+    - src/plugins/plugin-registry.ts
+    - src/plugins/context-helpers.ts
+    - src/proxy/http-handler.ts
+    - src/watch/watch-config-and-rules.ts
+    - tests/plugins.test.ts
+    - tests/response-pipeline.test.ts
+    - tests/watch-rules.test.ts
+    - README.md
+    - examples/README.md
+    - examples/rules/global/
+  component_details:
+    - component: Global rule authoring contract
+      responsibility: Define matcher variants and document how HTTP-global rules are authored under `rules/global` without changing existing domain-rule authoring.
+      interfaces:
+        - "`ProxyRule.match` (or equivalent matcher type) supports string, RegExp, sync function, and async function variants for HTTP-global rules."
+        - "A missing matcher is treated as an always-match global rule unless product direction changes during review."
+    - component: Discovery model
+      responsibility: Load domain rules exactly as today and enumerate `rules/global` entries as independent global rules with deterministic names/order.
+      interfaces:
+        - "`discoverPlugins(rulesDir)` returns enough metadata for the registry to distinguish domain rules from global HTTP rules."
+        - "Immediate child files/folders inside `rules/global` are treated as separate global rule units."
+    - component: Effective HTTP rule resolver
+      responsibility: Reconstruct the full request URL, evaluate global matchers asynchronously, and combine matched globals with the resolved domain rule into one request-scoped effective rule.
+      interfaces:
+        - "Async HTTP-only registry API returning `{ domain, rule, matchedGlobalIds }` or equivalent request-scoped selection metadata."
+        - "Existing synchronous `resolve(rawHost)` remains available for domain-only lookup."
+    - component: Cross-rule composer
+      responsibility: Compose hooks safely across matched globals and the domain rule while preserving short-circuit and body-mutation semantics.
+      interfaces:
+        - "`onRequest` chain stops on the first returned `StaticResponse`."
+        - "`modifyRequestBody` and `modifyResponseBody` chain sequentially across matched globals and the domain rule."
+        - "`target`, `resolveTarget`, and `logging` follow a documented precedence rule with the domain rule applied last."
+    - component: Runtime integration
+      responsibility: Feed the composed effective rule into the existing passthrough/pipeline branches without changing shared proxy concurrency safeguards.
+      interfaces:
+        - "`handleHttpRequest()` awaits the HTTP resolver before target selection, request-body buffering, and pipeline branching."
+  dependencies:
+    - component: Discovery model
+      relationship: Produces the domain/global rule inventory consumed by the registry.
+    - component: Effective HTTP rule resolver
+      relationship: Depends on discovery metadata and shared URL reconstruction helpers.
+    - component: Runtime integration
+      relationship: Consumes the registry’s async effective-rule output and passes it into existing proxy flow control.
+    - component: Tests and docs
+      relationship: Depend on the final matcher contract, ordering rules, and supported filesystem layout.
+  integration_points:
+    - HTTP request entry in `src/proxy/http-handler.ts`
+    - Rule discovery and hot-reload flow in `src/plugins/discover-plugins.ts`, `src/plugins/plugin-registry.ts`, and `src/watch/watch-config-and-rules.ts`
+    - Public rule authoring docs in `README.md` and `examples/README.md`
+
+contracts:
+  - from_task: GR-1
+    to_task: GR-2
+    interface: Discovery and type metadata distinguishes domain rules from global HTTP rules and defines matcher variants.
+    format: "Typed discovery payload plus `ProxyRule` matcher contract."
+  - from_task: GR-2
+    to_task: GR-3
+    interface: Registry exposes an async HTTP-only effective-rule resolution API while preserving the sync domain-only resolver.
+    format: "Promise resolving to request-scoped `{ domain, rule, matchedGlobalIds }` (or equivalent)."
+  - from_task: GR-2
+    to_task: GR-4
+    interface: Cross-rule composition semantics are stable enough to encode in regression tests.
+    format: "Documented ordering and hook-behavior matrix for composed rules."
+  - from_task: GR-4
+    to_task: GR-5
+    interface: Verified matcher/layout semantics for end-user documentation and examples.
+    format: "Passing tests plus supported filesystem layout and example behavior."
+
+tasks:
+  - id: GR-1
+    title: Extend the rule contract and discovery model for `rules/global`
+    description: |
+      Update the public rule authoring surface so HTTP-global rules can declare a matcher and be discovered separately from domain-addressed rules.
+      Preserve existing `rules/<domain>` folder/file behavior and current per-domain merge semantics.
+      Rollback note: if discovery becomes unstable, remove the `rules/global` special case and leave the existing domain-only loader untouched.
+    wave: 1
+    agent: gem-implementer
+    priority: high
+    status: completed
+    dependencies: []
+    context_files:
+      - /Users/admin/dev/proxy-rules/src/plugins/types.ts: Add matcher-related public types and comments for global-rule authoring.
+      - /Users/admin/dev/proxy-rules/src/plugins/discover-plugins.ts: Special-case `rules/global` as a namespace of independent global rule entries.
+      - /Users/admin/dev/proxy-rules/tests/plugins.test.ts: Extend discovery assertions without regressing current fixture domains.
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 220
+    focus_area: discovery_and_public_types
+    verification:
+      - Run discovery-focused tests and confirm existing domain fixtures are still loaded.
+      - Confirm `rules/global` is not treated as a fake hostname named `global`.
+      - Check for new diagnostics in the touched type/discovery files.
+    acceptance_criteria:
+      - The public rule contract exposes the matcher variants required for global HTTP rules.
+      - Discovery returns enough metadata to distinguish domain rules from global rules.
+      - Existing domain discovery order and merge behavior remain unchanged.
+    failure_modes:
+      - scenario: Loader treats `rules/global` as an ordinary hostname folder and no global rules ever run.
+        likelihood: medium
+        impact: high
+        mitigation: Add explicit discovery tests for `rules/global` and keep global discovery on a dedicated code path.
+      - scenario: The new matcher type unintentionally changes the behavior of existing domain rule typing.
+        likelihood: low
+        impact: medium
+        mitigation: Keep matcher handling optional and document that it is only interpreted for global HTTP rules.
+    tech_stack:
+      - TypeScript
+      - vite-node dynamic import loader
+    test_coverage: tests/plugins.test.ts
+
+  - id: GR-2
+    title: Build async HTTP-only effective-rule resolution and cross-rule composition
+    description: |
+      Add a request-scoped resolution path that reconstructs the full request URL, evaluates global matchers asynchronously, and composes every matched global rule with the resolved per-domain rule.
+      Do not reuse loader-time `mergeRules()` for this step; introduce runtime composition semantics that preserve static-response short-circuiting and allow multiple body modifiers to participate.
+      Rollback note: if composition semantics prove unstable, remove the HTTP-only resolver/composer and keep the existing sync domain resolver as the only path.
+    wave: 2
+    agent: gem-implementer
+    priority: high
+    status: completed
+    dependencies:
+      - GR-1
+    context_files:
+      - /Users/admin/dev/proxy-rules/src/plugins/plugin-registry.ts: Store global rule inventory and expose async HTTP resolution without breaking sync callers.
+      - /Users/admin/dev/proxy-rules/src/plugins/context-helpers.ts: Reuse or extract request-URL reconstruction for matcher evaluation.
+      - /Users/admin/dev/proxy-rules/src/plugins/discover-plugins.ts: Supply deterministic global rule metadata to the registry.
+    estimated_effort: large
+    estimated_files: 3
+    estimated_lines: 340
+    focus_area: registry_matching_and_composition
+    verification:
+      - Add unit coverage for string, RegExp, sync-function, async-function, and missing-match matcher cases.
+      - Assert that `onRequest` stops at the first `StaticResponse` and that body modifiers chain sequentially.
+      - Confirm the existing sync `resolve(rawHost)` path still behaves exactly as before.
+    acceptance_criteria:
+      - The registry can await async matchers without making CONNECT/WebSocket call sites asynchronous.
+      - The full request URL is evaluated consistently for absolute proxy requests and decrypted relative-path requests.
+      - The composed effective rule has deterministic ordering and preserves current domain-only behavior when no globals match.
+    failure_modes:
+      - scenario: Request-time composition silently drops `StaticResponse` returns or later hooks overwrite early short-circuit behavior.
+        likelihood: medium
+        impact: critical
+        mitigation: Encode short-circuit behavior in the composer and prove it with explicit unit and integration tests.
+      - scenario: Body modifiers conflict and produce surprising output order.
+        likelihood: medium
+        impact: high
+        mitigation: Document a single ordering rule (globals first, domain last) and test chained request/response body mutation.
+    tech_stack:
+      - TypeScript
+      - Node HTTP request objects
+      - Vitest
+    test_coverage: tests/plugins.test.ts
+
+  - id: GR-3
+    title: Switch HTTP request handling to the effective-rule path
+    description: |
+      Update HTTP request handling to await the new effective-rule resolver before target selection, request-body buffering, and the response-pipeline branch.
+      Keep the shared proxy concurrency model unchanged and leave CONNECT/WebSocket on the synchronous host-only resolver unless later requirements expand scope.
+      Rollback note: restore the previous `registry.resolve(rawHost)` call and remove the HTTP-global branch.
+    wave: 3
+    agent: gem-implementer
+    priority: high
+    status: completed
+    dependencies:
+      - GR-2
+    context_files:
+      - /Users/admin/dev/proxy-rules/src/proxy/http-handler.ts: Replace the host-only lookup with async effective-rule resolution.
+      - /Users/admin/dev/proxy-rules/src/proxy/response-pipeline.ts: Validate that the existing pipeline can consume the composed rule contract without further branching changes.
+      - /Users/admin/dev/proxy-rules/src/proxy/connect-handler.ts: Reference point confirming CONNECT remains on the sync path.
+    estimated_effort: medium
+    estimated_files: 2
+    estimated_lines: 140
+    focus_area: http_runtime_integration
+    verification:
+      - Run HTTP integration tests and compare behavior for requests with no matched globals against the prior domain-only baseline.
+      - Confirm passthrough and pipeline branches both receive the same composed rule object.
+      - Check that CONNECT/WebSocket behavior still relies on host-only lookup.
+    acceptance_criteria:
+      - HTTP requests with matched globals run global and domain hooks in the documented order.
+      - HTTP requests with no matched globals remain behaviorally identical to current host-only resolution.
+      - CONNECT and WebSocket code paths are unaffected by the async HTTP resolver.
+    failure_modes:
+      - scenario: The async HTTP resolver is invoked too late and misses `resolveTarget`, request buffering, or pipeline selection.
+        likelihood: medium
+        impact: high
+        mitigation: Resolve the effective rule immediately after host/domain normalization and before any downstream rule-dependent logic.
+      - scenario: Runtime integration reintroduces listener leakage or concurrent request interference.
+        likelihood: low
+        impact: high
+        mitigation: Keep the shared-proxy vs request-scoped-pipeline structure unchanged; only swap the source of the resolved rule.
+    tech_stack:
+      - TypeScript
+      - http-proxy
+    test_coverage: tests/response-pipeline.test.ts
+
+  - id: GR-4
+    title: Add regression coverage for globals, composition, and hot reload
+    description: |
+      Extend the existing tests to cover global discovery, matcher variants, runtime hook composition with a domain rule, and watcher-driven reloads when files under `rules/global` change.
+      Reuse the current fixture and live-proxy harnesses rather than introducing a new test framework.
+      Rollback note: if the new runtime semantics are reverted, remove only the new global-rule cases and keep the original suites intact.
+    wave: 4
+    agent: gem-implementer
+    priority: high
+    status: completed
+    dependencies:
+      - GR-2
+      - GR-3
+    context_files:
+      - /Users/admin/dev/proxy-rules/tests/plugins.test.ts: Unit coverage for discovery, matching, and registry behavior.
+      - /Users/admin/dev/proxy-rules/tests/watch-rules.test.ts: Reload coverage for `rules/global` changes.
+      - /Users/admin/dev/proxy-rules/tests/response-pipeline.test.ts: End-to-end HTTP hook composition coverage.
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 280
+    focus_area: regression_tests
+    verification:
+      - Run `tests/plugins.test.ts`, `tests/watch-rules.test.ts`, and `tests/response-pipeline.test.ts`.
+      - Confirm matcher variants, short-circuit behavior, and sequential body-modifier order are all asserted.
+      - Re-run the relevant suites after a fixture rewrite to catch hot-reload nondeterminism.
+    acceptance_criteria:
+      - Tests cover string, RegExp, sync-function, async-function, and missing-match global matcher cases.
+      - Tests prove matched globals and the domain rule both execute in the expected order.
+      - Watcher coverage proves global rules can be added, changed, and removed without a proxy restart.
+    failure_modes:
+      - scenario: Tests only cover happy-path matching and miss ordering or short-circuit regressions.
+        likelihood: medium
+        impact: high
+        mitigation: Add explicit assertions for hook order, returned static responses, and chained body mutations.
+      - scenario: Hot-reload tests are flaky because discovery order is not stable.
+        likelihood: medium
+        impact: medium
+        mitigation: Use deterministic fixture names and assert stable ordering through the registry/discovery layer.
+    tech_stack:
+      - Vitest
+      - live HTTP proxy integration harness
+    test_coverage: tests/plugins.test.ts, tests/watch-rules.test.ts, tests/response-pipeline.test.ts
+
+  - id: GR-5
+    title: Document `rules/global` and add a runnable example
+    description: |
+      Update the public docs and examples to show the supported `rules/global` layout, matcher variants, ordering/precedence, and the feature’s HTTP-only scope.
+      Add one runnable example that demonstrates a URL-pattern global rule coexisting with normal per-domain rules.
+      Rollback note: if the feature is pulled back before release, delete the new example and remove the global-rule sections from the docs.
+    wave: 5
+    agent: gem-documentation-writer
+    priority: medium
+    status: completed
+    dependencies:
+      - GR-4
+    context_files:
+      - /Users/admin/dev/proxy-rules/README.md: Public rule authoring reference.
+      - /Users/admin/dev/proxy-rules/examples/README.md: Example catalog and copy-paste guidance.
+      - /Users/admin/dev/proxy-rules/examples/rules/global/path-prefix.js: New runnable example file.
+    estimated_effort: small
+    estimated_files: 3
+    estimated_lines: 160
+    focus_area: docs_and_examples
+    verification:
+      - Cross-check docs against the final matcher behavior and ordering semantics proven by tests.
+      - Verify the example path mirrors the supported filesystem layout exactly.
+    acceptance_criteria:
+      - The README explains where global rules live and how matcher variants behave.
+      - The examples guide helps users decide between a global rule and a domain rule.
+      - The runnable example demonstrates coexistence with domain-specific behavior.
+    failure_modes:
+      - scenario: Docs describe matcher semantics or file layout differently from the implementation.
+        likelihood: medium
+        impact: medium
+        mitigation: Write docs only after tests pass and derive wording from the verified behavior matrix.
+    tech_stack:
+      - Markdown
+      - JavaScript examples
+    task_type: documentation
+    audience: developers
+    coverage_matrix:
+      - rules/global filesystem layout
+      - matcher variants and default matching behavior
+      - ordering/precedence between global and domain rules
+      - HTTP-only scope and hot-reload expectations
+
+  - id: GR-6
+    title: Review backward compatibility and release readiness
+    description: |
+      Perform a focused review of the implemented change set for backward compatibility, determinism, and scope control.
+      Confirm the final patch keeps existing domain-only behavior intact and does not accidentally broaden global matching into raw CONNECT or WebSocket flows.
+    wave: 6
+    agent: gem-reviewer
+    priority: medium
+    status: pending
+    dependencies:
+      - GR-4
+      - GR-5
+    context_files:
+      - /Users/admin/dev/proxy-rules/src/plugins/plugin-registry.ts: Review sync vs async resolution boundaries.
+      - /Users/admin/dev/proxy-rules/src/proxy/http-handler.ts: Review request-time integration points.
+      - /Users/admin/dev/proxy-rules/README.md: Review public behavior claims.
+    estimated_effort: small
+    estimated_files: 3
+    estimated_lines: 120
+    focus_area: compatibility_review
+    verification:
+      - Check that all acceptance criteria from waves 1-5 are covered by tests or docs.
+      - Confirm no unresolved open question blocks shipping the implementation.
+    acceptance_criteria:
+      - Existing domain-only workflows remain backward compatible.
+      - Global matching scope is explicitly limited to HTTP request handling.
+      - Ordering, rollback, and test coverage are clear enough for implementation handoff.
+    failure_modes:
+      - scenario: Hidden coupling to CONNECT/WebSocket remains undocumented and causes surprise regressions later.
+        likelihood: low
+        impact: high
+        mitigation: Review all registry consumers and document why only HTTP adopts the new async path.
+    requires_review: true
+    review_depth: standard
+    security_sensitive: false

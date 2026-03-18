@@ -7,12 +7,21 @@ const TEXT_CONTENT_TYPES = ["text/", "application/json", "application/xml", "app
 const MAX_BODY_LINES = 200;
 const BASE64_LINE_WIDTH = 76;
 
-function buildReqUrl(req: http.IncomingMessage): string {
+export function buildRequestUrl(req: http.IncomingMessage): string {
   const reqUrl = req.url ?? "/";
-  if (reqUrl.startsWith("http://") || reqUrl.startsWith("https://")) return reqUrl;
-  const proto = (req.socket as { encrypted?: boolean }).encrypted ? "https" : "http";
-  const host = req.headers["host"] ?? "localhost";
-  return `${proto}://${host}${reqUrl}`;
+  const absoluteUrl = reqUrl.startsWith("http://") || reqUrl.startsWith("https://")
+    ? reqUrl
+    : `${(req.socket as { encrypted?: boolean }).encrypted ? "https" : "http"}://${req.headers["host"] ?? "localhost"}${reqUrl}`;
+
+  try {
+    const parsed = new URL(absoluteUrl);
+    if ((parsed.protocol === "http:" && parsed.port === "80") || (parsed.protocol === "https:" && parsed.port === "443")) {
+      parsed.port = "";
+    }
+    return parsed.toString();
+  } catch {
+    return absoluteUrl;
+  }
 }
 
 function escapeShellArg(s: string): string {
@@ -73,7 +82,7 @@ function toCurl(
   req: http.IncomingMessage,
   res?: http.IncomingMessage | http.ServerResponse,
 ): string {
-  const url = buildReqUrl(req);
+  const url = buildRequestUrl(req);
   const method = req.method ?? "GET";
   const parts: string[] = [`curl -v ${escapeShellArg(url)}`];
 
@@ -142,7 +151,7 @@ function toCurl(
 function toFetch(
   req: http.IncomingMessage,
 ): { url: string; options: { method: string; headers: Record<string, string> } } {
-  const url = buildReqUrl(req);
+  const url = buildRequestUrl(req);
   const headers: Record<string, string> = {};
   for (const [key, val] of Object.entries(req.headers)) {
     if (val !== undefined) headers[key] = Array.isArray(val) ? val.join(", ") : val;

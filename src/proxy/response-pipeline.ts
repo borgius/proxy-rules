@@ -83,6 +83,7 @@ export function runResponsePipeline(
   target: string,
   rule: ProxyRule,
   domain: string,
+  requestUrl: string,
   config: ProxyConfig,
   logger: Logger,
   preBufferedRequestBody: Buffer | null = null,
@@ -120,7 +121,7 @@ export function runResponsePipeline(
       try {
         // onRequest — may return a StaticResponse.
         if (rule.onRequest) {
-          const result = await rule.onRequest({ req, proxyReq, res, domain, url: req.url ?? "" });
+          const result = await rule.onRequest({ req, proxyReq, res, domain, url: requestUrl });
           if (result != null) {
             const { status = 200, headers = {}, body = "", contentType } = result as StaticResponse;
             const responseHeaders: http.OutgoingHttpHeaders = { ...headers };
@@ -151,7 +152,7 @@ export function runResponsePipeline(
                 proxyReq,
                 res,
                 domain,
-                url: req.url ?? "",
+                url: requestUrl,
                 contentType,
               });
             } catch (err) {
@@ -268,7 +269,7 @@ export function runResponsePipeline(
 
       logger.info("\u2190 HTTP", {
         method: req.method,
-        url: req.url,
+        url: requestUrl,
         domain,
         status: statusCode,
         ms: Date.now() - startTime,

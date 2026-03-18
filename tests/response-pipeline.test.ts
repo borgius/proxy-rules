@@ -17,6 +17,7 @@ import http from "node:http";
 import type net from "node:net";
 import { initLogger } from "../src/logging/logger.ts";
 import { PluginRegistry } from "../src/plugins/plugin-registry.ts";
+import type { DiscoveredPlugin } from "../src/plugins/discover-plugins.ts";
 import { createProxyServer } from "../src/proxy/create-http-proxy.ts";
 import { handleHttpRequest } from "../src/proxy/http-handler.ts";
 import type { ProxyConfig } from "../src/config/schema.ts";
@@ -49,11 +50,45 @@ async function withProxy(
   const registry = new PluginRegistry(config.ignoreSubDomains);
   registry.replace([{ domain: "dummyjson.com", rule }]);
 
+  return withProxyPlugins(registry, fn);
+}
+
+async function withProxyPlugins(
+  registry: PluginRegistry,
+  fn: (port: number) => Promise<void>,
+): Promise<void> {
   const proxy = createProxyServer();
   const server = http.createServer((req, res) => {
-    handleHttpRequest(req, res, proxy, registry, config);
+    void handleHttpRequest(req, res, proxy, registry, config);
   });
 
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as net.AddressInfo;
+
+  try {
+    await fn(port);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+}
+
+async function withDiscoveredPlugins(
+  plugins: DiscoveredPlugin[],
+  fn: (port: number) => Promise<void>,
+): Promise<void> {
+  const registry = new PluginRegistry(config.ignoreSubDomains);
+  registry.replace(plugins);
+
+  return withProxyPlugins(registry, fn);
+}
+
+async function withUpstream(
+  handler: http.RequestListener,
+  fn: (port: number) => Promise<void>,
+): Promise<void> {
+  const server = http.createServer(handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as net.AddressInfo;
 
@@ -73,21 +108,29 @@ async function withProxy(
  */
 async function requestThroughProxy(
   proxyPort: number,
-  host: string,
-  path: string,
+  options: {
+    host: string;
+    path: string;
+    method?: string;
+    headers?: http.OutgoingHttpHeaders;
+    body?: string;
+  },
 ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
+    const body = options.body;
     const req = http.request(
       {
         hostname: "127.0.0.1",
         port: proxyPort,
-        path,
-        method: "GET",
+        path: options.path,
+        method: options.method ?? "GET",
         headers: {
-          host,
+          host: options.host,
           // Ask for uncompressed response so we can compare the body as text.
           // The pipeline also injects this header but belt-and-suspenders here.
           "accept-encoding": "identity",
+          ...(body ? { "content-length": Buffer.byteLength(body, "utf8") } : {}),
+          ...options.headers,
         },
       },
       (res) => {
@@ -103,6 +146,9 @@ async function requestThroughProxy(
       },
     );
     req.on("error", reject);
+    if (body) {
+      req.write(body);
+    }
     req.end();
   });
 }
@@ -135,8 +181,7 @@ describe("response pipeline — live dummyjson.com", () => {
         async (proxyPort) => {
           const { status, headers, body: proxyBody } = await requestThroughProxy(
             proxyPort,
-            "dummyjson.com",
-            "/products",
+            { host: "dummyjson.com", path: "/products" },
           );
 
           expect(status).toBe(200);
@@ -179,8 +224,7 @@ describe("response pipeline — live dummyjson.com", () => {
         async (proxyPort) => {
           const { status, headers, body } = await requestThroughProxy(
             proxyPort,
-            "dummyjson.com",
-            "/products",
+            { host: "dummyjson.com", path: "/products" },
           );
 
           expect(status).toBe(200);
@@ -205,5 +249,208 @@ describe("response pipeline — live dummyjson.com", () => {
     },
     30_000,
   );
+});
+
+describe("response pipeline — effective HTTP rule integration", () => {
+  test("runs matched global and domain hooks in order on the passthrough branch", async () => {
+    const events: string[] = [];
+
+    await withUpstream(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("ok");
+      },
+      async (upstreamPort) => {
+        await withDiscoveredPlugins(
+          [
+            {
+              kind: "global",
+              name: "audit",
+              rule: {
+                match: "/passthrough",
+                target: `http://127.0.0.1:${upstreamPort}`,
+                onRequest(ctx) {
+                  events.push(`global:onRequest:${ctx.url}`);
+                  ctx.proxyReq.setHeader("x-global", "1");
+                  return undefined;
+                },
+                onResponse() {
+                  events.push("global:onResponse");
+                },
+              },
+            },
+            {
+              kind: "domain",
+              domain: "api.example.com",
+              rule: {
+                target: `http://127.0.0.1:${upstreamPort}`,
+                onRequest(ctx) {
+                  events.push(`domain:onRequest:${ctx.url}`);
+                  ctx.proxyReq.setHeader("x-domain", "1");
+                  return undefined;
+                },
+                onResponse() {
+                  events.push("domain:onResponse");
+                },
+              },
+            },
+          ],
+          async (proxyPort) => {
+            const response = await requestThroughProxy(proxyPort, {
+              host: "api.example.com",
+              path: "/passthrough?x=1",
+            });
+
+            expect(response.status).toBe(200);
+            expect(response.body).toBe("ok");
+          },
+        );
+      },
+    );
+
+    expect(events).toEqual([
+      "global:onRequest:http://api.example.com/passthrough?x=1",
+      "domain:onRequest:http://api.example.com/passthrough?x=1",
+      "global:onResponse",
+      "domain:onResponse",
+    ]);
+  });
+
+  test("passes the same composed rule and absolute URL into the response pipeline branch", async () => {
+    const events: string[] = [];
+
+    await withUpstream(
+      (req, res) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", () => {
+          res.writeHead(200, { "content-type": "text/plain" });
+          res.end(`upstream:${Buffer.concat(chunks).toString("utf8")}`);
+        });
+      },
+      async (upstreamPort) => {
+        await withDiscoveredPlugins(
+          [
+            {
+              kind: "global",
+              name: "audit",
+              rule: {
+                match: "/pipeline",
+                target: `http://127.0.0.1:${upstreamPort}`,
+                onRequest(ctx) {
+                  events.push(`global:onRequest:${ctx.url}`);
+                  return undefined;
+                },
+                modifyRequestBody(body, ctx) {
+                  events.push(`global:modifyRequestBody:${ctx.url}`);
+                  return `${body}|global:${ctx.url}`;
+                },
+                modifyResponseBody(body) {
+                  events.push("global:modifyResponseBody");
+                  return `${body}|global`;
+                },
+                onResponse() {
+                  events.push("global:onResponse");
+                },
+              },
+            },
+            {
+              kind: "domain",
+              domain: "api.example.com",
+              rule: {
+                target: `http://127.0.0.1:${upstreamPort}`,
+                onRequest(ctx) {
+                  events.push(`domain:onRequest:${ctx.url}`);
+                  return undefined;
+                },
+                modifyRequestBody(body, ctx) {
+                  events.push(`domain:modifyRequestBody:${ctx.url}`);
+                  return `${body}|domain:${ctx.url}`;
+                },
+                modifyResponseBody(body) {
+                  events.push("domain:modifyResponseBody");
+                  return `${body}|domain`;
+                },
+                onResponse() {
+                  events.push("domain:onResponse");
+                },
+              },
+            },
+          ],
+          async (proxyPort) => {
+            const response = await requestThroughProxy(proxyPort, {
+              host: "api.example.com",
+              path: "/pipeline?x=1",
+              method: "POST",
+              headers: { "content-type": "text/plain" },
+              body: "payload",
+            });
+
+            expect(response.status).toBe(200);
+            expect(response.body).toBe(
+              "upstream:payload|global:http://api.example.com/pipeline?x=1|domain:http://api.example.com/pipeline?x=1|global|domain",
+            );
+          },
+        );
+      },
+    );
+
+    expect(events).toEqual([
+      "global:onRequest:http://api.example.com/pipeline?x=1",
+      "domain:onRequest:http://api.example.com/pipeline?x=1",
+      "global:modifyRequestBody:http://api.example.com/pipeline?x=1",
+      "domain:modifyRequestBody:http://api.example.com/pipeline?x=1",
+      "global:modifyResponseBody",
+      "domain:modifyResponseBody",
+      "global:onResponse",
+      "domain:onResponse",
+    ]);
+  });
+
+  test("preserves domain-only HTTP behavior when no global rules match", async () => {
+    const domainRule: ProxyRule = {
+      target: "",
+      modifyResponseBody(body) {
+        return `${body}|domain-only`;
+      },
+    };
+
+    await withUpstream(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("baseline");
+      },
+      async (upstreamPort) => {
+        domainRule.target = `http://127.0.0.1:${upstreamPort}`;
+
+        let baseline: Awaited<ReturnType<typeof requestThroughProxy>> | undefined;
+        await withDiscoveredPlugins(
+          [{ kind: "domain", domain: "api.example.com", rule: domainRule }],
+          async (proxyPort) => {
+            baseline = await requestThroughProxy(proxyPort, {
+              host: "api.example.com",
+              path: "/baseline",
+            });
+          },
+        );
+
+        let withMissedGlobal: Awaited<ReturnType<typeof requestThroughProxy>> | undefined;
+        await withDiscoveredPlugins(
+          [
+            { kind: "global", name: "miss", rule: { match: "/never/", target: `http://127.0.0.1:${upstreamPort}` } },
+            { kind: "domain", domain: "api.example.com", rule: domainRule },
+          ],
+          async (proxyPort) => {
+            withMissedGlobal = await requestThroughProxy(proxyPort, {
+              host: "api.example.com",
+              path: "/baseline",
+            });
+          },
+        );
+
+        expect(withMissedGlobal).toEqual(baseline);
+      },
+    );
+  });
 });
 

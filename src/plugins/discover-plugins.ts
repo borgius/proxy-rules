@@ -5,10 +5,19 @@ import { pathToFileURL } from "node:url";
 import type { ProxyRule } from "./types.ts";
 import { getLogger } from "../logging/logger.ts";
 
-export interface DiscoveredPlugin {
+export interface DiscoveredDomainPlugin {
+  kind?: "domain";
   domain: string;
   rule: ProxyRule;
 }
+
+export interface DiscoveredGlobalPlugin {
+  kind: "global";
+  name: string;
+  rule: ProxyRule;
+}
+
+export type DiscoveredPlugin = DiscoveredDomainPlugin | DiscoveredGlobalPlugin;
 
 /**
  * Dynamically import a single TypeScript/JavaScript module and extract its
@@ -69,6 +78,7 @@ function mergeRules(rules: ProxyRule[]): ProxyRule {
   if (onRequests.length) {
     merged.onRequest = async (ctx) => {
       for (const fn of onRequests) await fn(ctx);
+      return undefined;
     };
   }
 
@@ -139,6 +149,39 @@ async function loadDomainFolder(domainDir: string): Promise<ProxyRule | null> {
   return mergeRules(rules);
 }
 
+async function loadRuleEntry(rulePath: string, entryName: string): Promise<ProxyRule | null> {
+  const stat = statSync(rulePath);
+
+  if (stat.isDirectory()) {
+    return loadDomainFolder(rulePath);
+  }
+
+  if ((entryName.endsWith(".ts") || entryName.endsWith(".js")) && !entryName.startsWith("_")) {
+    return importRule(rulePath);
+  }
+
+  return null;
+}
+
+async function discoverGlobalPlugins(globalDir: string): Promise<DiscoveredGlobalPlugin[]> {
+  if (!existsSync(globalDir)) return [];
+
+  const globals: DiscoveredGlobalPlugin[] = [];
+  const entries = readdirSync(globalDir).sort((a, b) => a.localeCompare(b));
+
+  for (const entry of entries) {
+    const rulePath = join(globalDir, entry);
+    const rule = await loadRuleEntry(rulePath, entry);
+    if (!rule) continue;
+
+    const name = basename(entry, entry.endsWith(".ts") ? ".ts" : ".js");
+    globals.push({ kind: "global", name, rule });
+    getLogger().debug(`Loaded global plugin: ${name}`);
+  }
+
+  return globals;
+}
+
 /**
  * Scan the `rulesDir` and return all successfully loaded domain plugins.
  */
@@ -156,10 +199,15 @@ export async function discoverPlugins(rulesDir: string): Promise<DiscoveredPlugi
     const stat = statSync(fullPath);
 
     if (stat.isDirectory()) {
+      if (entry === "global") {
+        plugins.push(...await discoverGlobalPlugins(fullPath));
+        continue;
+      }
+
       const domain = entry;
       const rule = await loadDomainFolder(fullPath);
       if (rule) {
-        plugins.push({ domain, rule });
+        plugins.push({ kind: "domain", domain, rule });
         getLogger().debug(`Loaded plugin for domain: ${domain}`);
       }
     } else if ((entry.endsWith(".ts") || entry.endsWith(".js")) && !entry.startsWith("_")) {
@@ -167,7 +215,7 @@ export async function discoverPlugins(rulesDir: string): Promise<DiscoveredPlugi
       const domain = basename(entry, entry.endsWith(".ts") ? ".ts" : ".js");
       const rule = await importRule(fullPath);
       if (rule) {
-        plugins.push({ domain, rule });
+        plugins.push({ kind: "domain", domain, rule });
         getLogger().debug(`Loaded top-level plugin for domain: ${domain}`);
       }
     }

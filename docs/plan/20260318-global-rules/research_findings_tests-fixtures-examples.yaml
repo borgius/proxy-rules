@@ -1,0 +1,545 @@
+plan_id: 20260318-global-rules
+objective: add global rules support plus matching semantics
+focus_area: tests-fixtures-examples
+created_at: '2026-03-18T00:00:00Z'
+created_by: GitHub Copilot (GPT-5.4)
+status: completed
+
+tldr: |
+  - Current authored rules are domain-addressed by file/folder name; examples and fixtures consistently use `rules/<domain>/index.(js|ts)` plus `export default rule`.
+  - Existing test coverage is strongest around discovery/registry resolution (`tests/plugins.test.ts`), config/rules path resolution (`tests/config.test.ts`), hot reload (`tests/watch-rules.test.ts`), and end-to-end hook execution after a rule is selected (`tests/response-pipeline.test.ts`).
+  - There is no current `match` authoring surface in examples, fixtures, or `ProxyRule` docs; the visible authoring selectors today are domain naming, `resolveTarget`, and optional `priority`.
+  - The docs most likely affected by global rules are `README.md` Rule plugins sections and `examples/README.md`, plus at least one new example folder/file showing non-domain-scoped matching.
+
+research_metadata:
+  methodology: hybrid retrieval using semantic_search + grep_search, followed by targeted read_file examination of tests, fixtures, examples, and registry/discovery/types files; lightweight terminal metadata for line counts
+  scope: focused review of rule authoring evidence in tests, fixtures, examples, and adjacent loader/registry/docs references needed to place new coverage accurately
+  confidence: high
+  coverage: 92
+
+files_analyzed:
+  - file: plugins.test.ts
+    path: /Users/admin/dev/proxy-rules/tests/plugins.test.ts
+    purpose: Validates plugin discovery and registry hostname resolution against fixture-authored rules.
+    key_elements:
+      - element: discovers all fixture domain folders
+        type: test
+        location: tests/plugins.test.ts:28
+        description: Verifies discovery from `tests/fixtures/proxy-rules/rules` using folder names as domains.
+      - element: reloads updated rule module contents after file changes
+        type: test
+        location: tests/plugins.test.ts:39
+        description: Uses temporary authored rule files to verify dynamic re-import and changed hook behavior.
+      - element: PluginRegistry.resolve
+        type: test-group
+        location: tests/plugins.test.ts:88
+        description: Covers exact domain, host-with-port, ignored subdomain normalization, unknown domain, and logging-only rules.
+    language: TypeScript
+    lines: 145
+
+  - file: watch-rules.test.ts
+    path: /Users/admin/dev/proxy-rules/tests/watch-rules.test.ts
+    purpose: Verifies hot reload behavior when an authored rule file changes on disk.
+    key_elements:
+      - element: writeRule
+        type: helper
+        location: tests/watch-rules.test.ts:17
+        description: Emits a canonical single-file rule module with `target`, `modifyResponseBody`, and `export default rule`.
+      - element: reloads a modified rule file without restarting
+        type: test
+        location: tests/watch-rules.test.ts:59
+        description: Confirms watcher-triggered re-discovery and registry replacement for a domain folder.
+    language: TypeScript
+    lines: 86
+
+  - file: config.test.ts
+    path: /Users/admin/dev/proxy-rules/tests/config.test.ts
+    purpose: Covers config loading and rules directory selection, including global-vs-project config merging.
+    key_elements:
+      - element: loads and parses fixture config.json
+        type: test
+        location: tests/config.test.ts:17
+        description: Establishes the fixture root and expected `paths.rulesDir` behavior.
+      - element: merges global config with project-local rules and overrides
+        type: test
+        location: tests/config.test.ts:50
+        description: Demonstrates current global/project merge semantics and where rules path selection is asserted.
+      - element: uses rules override without changing cert location
+        type: test
+        location: tests/config.test.ts:100
+        description: Shows rules directory can be overridden independently from global certificate storage.
+    language: TypeScript
+    lines: 162
+
+  - file: response-pipeline.test.ts
+    path: /Users/admin/dev/proxy-rules/tests/response-pipeline.test.ts
+    purpose: End-to-end validation of hook execution once a selected rule is active.
+    key_elements:
+      - element: withProxy
+        type: helper
+        location: tests/response-pipeline.test.ts:40
+        description: Injects a single in-memory rule into `PluginRegistry` for integration tests.
+      - element: returns identical JSON when modifyResponseBody passes body through unchanged
+        type: test
+        location: tests/response-pipeline.test.ts:118
+        description: Verifies no-op body modifier behavior through the full proxy stack.
+      - element: modifyResponseBody can mutate live JSON and result is structurally valid
+        type: test
+        location: tests/response-pipeline.test.ts:161
+        description: Verifies response-body mutation and content-length rewriting in a live proxy flow.
+    language: TypeScript
+    lines: 209
+
+  - file: api.example.com fixture
+    path: /Users/admin/dev/proxy-rules/tests/fixtures/proxy-rules/rules/api.example.com/index.ts
+    purpose: Minimal typed fixture showing header mutation via `onRequest`.
+    key_elements:
+      - element: rule
+        type: pattern
+        location: tests/fixtures/proxy-rules/rules/api.example.com/index.ts:8
+        description: Domain-scoped `ProxyRule` with `target`, `onRequest`, and `logging`.
+    language: TypeScript
+    lines: 20
+
+  - file: httpbin.org fixture
+    path: /Users/admin/dev/proxy-rules/tests/fixtures/proxy-rules/rules/httpbin.org/index.ts
+    purpose: Typed fixture showing passthrough request/response logging hooks.
+    key_elements:
+      - element: rule
+        type: pattern
+        location: tests/fixtures/proxy-rules/rules/httpbin.org/index.ts:8
+        description: Demonstrates `target`, `onRequest`, `onResponse`, and `logging` without body mutation.
+    language: TypeScript
+    lines: 22
+
+  - file: json.example.com fixture
+    path: /Users/admin/dev/proxy-rules/tests/fixtures/proxy-rules/rules/json.example.com/index.ts
+    purpose: Typed fixture showing `modifyResponseBody` authoring.
+    key_elements:
+      - element: rule
+        type: pattern
+        location: tests/fixtures/proxy-rules/rules/json.example.com/index.ts:8
+        description: Demonstrates content-type-gated response-body replacement and `captureBody` logging.
+    language: TypeScript
+    lines: 22
+
+  - file: monitored.internal fixture
+    path: /Users/admin/dev/proxy-rules/tests/fixtures/proxy-rules/rules/monitored.internal/index.ts
+    purpose: Typed fixture showing logging-only rules with no `target`.
+    key_elements:
+      - element: rule
+        type: pattern
+        location: tests/fixtures/proxy-rules/rules/monitored.internal/index.ts:8
+        description: Demonstrates `onConnect`, `onRequest`, `onWebSocketOpen`, and `onWebSocketClose` on a domain folder.
+    language: TypeScript
+    lines: 29
+
+  - file: fixture config.json
+    path: /Users/admin/dev/proxy-rules/tests/fixtures/proxy-rules/config.json
+    purpose: Baseline config fixture for tests that discover rules from a fixture rules directory.
+    key_elements:
+      - element: ignoreSubDomains
+        type: variable
+        location: tests/fixtures/proxy-rules/config.json:4
+        description: Shows current hostname normalization inputs exercised by tests.
+    language: JSON
+    lines: 11
+
+  - file: README.md
+    path: /Users/admin/dev/proxy-rules/README.md
+    purpose: Main public documentation for how rules are authored and matched today.
+    key_elements:
+      - element: Rule plugins
+        type: documentation
+        location: README.md:130
+        description: States rules are JS/TS modules exporting a default `ProxyRule` and matched by normalized hostname + folder lookup.
+      - element: Request/response hooks
+        type: documentation
+        location: README.md:147
+        description: Shows the current public hook authoring surface.
+      - element: Returning a static response
+        type: documentation
+        location: README.md:219
+        description: Documents `onRequest` short-circuit semantics.
+      - element: Dynamic upstream target
+        type: documentation
+        location: README.md:289
+        description: Documents `resolveTarget` as the current per-request selection hook.
+      - element: Multi-module domains
+        type: documentation
+        location: README.md:320
+        description: Documents composition of multiple files inside one domain folder.
+    language: Markdown
+    lines: 407
+
+  - file: examples/README.md
+    path: /Users/admin/dev/proxy-rules/examples/README.md
+    purpose: Human-oriented catalog of authoring patterns backed by runnable example rule files.
+    key_elements:
+      - element: Examples at a glance
+        type: documentation
+        location: examples/README.md:12
+        description: Maps example folders to capabilities users can copy and adapt.
+      - element: Static response — returning from onRequest
+        type: documentation
+        location: examples/README.md:29
+        description: Shows short-circuit response authoring pattern.
+      - element: Dynamic target — resolveTarget
+        type: documentation
+        location: examples/README.md:80
+        description: Shows path-based and async target selection.
+      - element: Request body / response body / response headers sections
+        type: documentation
+        location: examples/README.md:176
+        description: Documents the current hook-based rule patterns users see first.
+    language: Markdown
+    lines: 333
+
+  - file: api.example.com example
+    path: /Users/admin/dev/proxy-rules/examples/rules/api.example.com/index.js
+    purpose: Selective static response pattern for one domain.
+    key_elements:
+      - element: onRequest
+        type: pattern
+        location: examples/rules/api.example.com/index.js:16
+        description: Computes a pathname from `ctx.url`, blocks matching prefixes, otherwise forwards and mutates headers.
+    language: JavaScript
+    lines: 35
+
+  - file: gateway.example.com example
+    path: /Users/admin/dev/proxy-rules/examples/rules/gateway.example.com/index.js
+    purpose: Path-based routing using `resolveTarget` with a fallback `target`.
+    key_elements:
+      - element: resolveTarget
+        type: pattern
+        location: examples/rules/gateway.example.com/index.js:25
+        description: Maps URL prefixes to different upstreams before request forwarding.
+    language: JavaScript
+    lines: 46
+
+  - file: shop.example.com example
+    path: /Users/admin/dev/proxy-rules/examples/rules/shop.example.com/index.js
+    purpose: Deterministic canary routing example.
+    key_elements:
+      - element: resolveTarget
+        type: pattern
+        location: examples/rules/shop.example.com/index.js:36
+        description: Performs request-based bucketing to choose production vs canary target.
+    language: JavaScript
+    lines: 53
+
+  - file: payload.example.com example
+    path: /Users/admin/dev/proxy-rules/examples/rules/payload.example.com/index.js
+    purpose: Request body mutation example.
+    key_elements:
+      - element: modifyRequestBody
+        type: pattern
+        location: examples/rules/payload.example.com/index.js:21
+        description: Shows JSON and URL-encoded form rewriting with `undefined` as passthrough.
+    language: JavaScript
+    lines: 60
+
+  - file: resp-body.example.com example
+    path: /Users/admin/dev/proxy-rules/examples/rules/resp-body.example.com/index.js
+    purpose: Rich response mutation example combining headers and body.
+    key_elements:
+      - element: onResponse
+        type: pattern
+        location: examples/rules/resp-body.example.com/index.js:23
+        description: Shows header mutation before body rewrite.
+      - element: modifyResponseBody
+        type: pattern
+        location: examples/rules/resp-body.example.com/index.js:32
+        description: Shows content-type-specific JSON/HTML/text/JS rewriting.
+    language: JavaScript
+    lines: 104
+
+  - file: headers.example.com example
+    path: /Users/admin/dev/proxy-rules/examples/rules/headers.example.com/index.js
+    purpose: Request header mutation example.
+    key_elements:
+      - element: onRequest
+        type: pattern
+        location: examples/rules/headers.example.com/index.js:18
+        description: Shows add/override/remove headers and optional env-based auth injection.
+    language: JavaScript
+    lines: 58
+
+  - file: resp-headers.example.com example
+    path: /Users/admin/dev/proxy-rules/examples/rules/resp-headers.example.com/index.js
+    purpose: Response header mutation example.
+    key_elements:
+      - element: onResponse
+        type: pattern
+        location: examples/rules/resp-headers.example.com/index.js:15
+        description: Shows response header injection, override, and removal.
+    language: JavaScript
+    lines: 53
+
+  - file: mock-api.example.com example
+    path: /Users/admin/dev/proxy-rules/examples/rules/mock-api.example.com/index.js
+    purpose: Full static response example with no upstream target.
+    key_elements:
+      - element: onRequest
+        type: pattern
+        location: examples/rules/mock-api.example.com/index.js:24
+        description: Always returns a `StaticResponse` and never forwards upstream.
+    language: JavaScript
+    lines: 41
+
+  - file: maintenance.example.com example
+    path: /Users/admin/dev/proxy-rules/examples/rules/maintenance.example.com/index.js
+    purpose: Minimal unconditional block/maintenance example.
+    key_elements:
+      - element: onRequest
+        type: pattern
+        location: examples/rules/maintenance.example.com/index.js:21
+        description: Returns a 503 HTML response for every request.
+    language: JavaScript
+    lines: 33
+
+  - file: cors.example.com example
+    path: /Users/admin/dev/proxy-rules/examples/rules/cors.example.com/index.js
+    purpose: Mixed selective interception plus normal forwarding example.
+    key_elements:
+      - element: onRequest
+        type: pattern
+        location: examples/rules/cors.example.com/index.js:21
+        description: Short-circuits preflight requests and forwards other methods with header mutation.
+    language: JavaScript
+    lines: 46
+
+patterns_found:
+  - category: structure
+    pattern: Domain-by-path authoring
+    description: Rules are authored as one module per domain folder (`rules/<domain>/index.(js|ts)`) or top-level domain-named files; the filesystem name is the matching key.
+    examples:
+      - file: README.md
+        location: README.md:130
+        snippet: Rules are matched by normalising the requested hostname and looking up a matching folder under the active rules directory.
+      - file: tests/plugins.test.ts
+        location: tests/plugins.test.ts:28
+        snippet: Fixture discovery asserts `httpbin.org`, `api.example.com`, `json.example.com`, `monitored.internal`.
+      - file: src/plugins/discover-plugins.ts
+        location: src/plugins/discover-plugins.ts:103
+        snippet: Supports `rules/example.com/index.ts` and top-level single files where basename becomes the domain.
+    prevalence: common
+
+  - category: architecture
+    pattern: Hook-oriented `ProxyRule` modules with default export
+    description: Every example and fixture exports a single `rule` object typed as `ProxyRule`, then fills in optional hooks.
+    examples:
+      - file: examples/rules/api.example.com/index.js
+        location: examples/rules/api.example.com/index.js:12
+        snippet: /** @type {import('proxy-rules/types').ProxyRule} */ const rule = { ... }; export default rule;
+      - file: tests/fixtures/proxy-rules/rules/api.example.com/index.ts
+        location: tests/fixtures/proxy-rules/rules/api.example.com/index.ts:7
+        snippet: const rule: ProxyRule = { ... }; export default rule;
+      - file: README.md
+        location: README.md:134
+        snippet: Minimal example shows a default-exported `ProxyRule` object.
+    prevalence: common
+
+  - category: naming
+    pattern: Matching semantics are currently hostname normalization plus optional priority
+    description: Public docs and tests expose exact-domain lookup, port stripping, ignored-subdomain normalization, and `priority`; no current `match` property is documented or exercised.
+    examples:
+      - file: tests/plugins.test.ts
+        location: tests/plugins.test.ts:98
+        snippet: Registry tests cover exact domain, host with port, ignored `www`, and unknown host.
+      - file: src/plugins/plugin-registry.ts
+        location: src/plugins/plugin-registry.ts:58
+        snippet: `resolve` extracts hostname, normalizes it, then performs exact candidate lookup.
+      - file: src/plugins/types.ts
+        location: src/plugins/types.ts:246
+        snippet: `priority?: number` is the only documented matching-related field beyond target/hook behavior.
+    prevalence: common
+
+  - category: testing
+    pattern: Tests separate selection/discovery from runtime hook execution
+    description: File-system and registry semantics are covered in `plugins.test.ts`/`watch-rules.test.ts`/`config.test.ts`, while hook behavior after selection is covered by `response-pipeline.test.ts`.
+    examples:
+      - file: tests/plugins.test.ts
+        location: tests/plugins.test.ts:88
+        snippet: `PluginRegistry.resolve` tests selection behavior.
+      - file: tests/watch-rules.test.ts
+        location: tests/watch-rules.test.ts:59
+        snippet: Watcher test verifies live replacement of authored rule files.
+      - file: tests/response-pipeline.test.ts
+        location: tests/response-pipeline.test.ts:118
+        snippet: Integration tests validate body hook execution once the rule is active.
+    prevalence: common
+
+  - category: documentation
+    pattern: Examples focus on per-domain capabilities, not cross-domain/global selection
+    description: Shipped examples explain static responses, target resolution, header/body mutation, and logging-only rules, all anchored to domain-specific folders.
+    examples:
+      - file: examples/README.md
+        location: examples/README.md:12
+        snippet: Example catalog is entirely domain folder based.
+      - file: examples/rules/gateway.example.com/index.js
+        location: examples/rules/gateway.example.com/index.js:25
+        snippet: `resolveTarget` is shown as the advanced selector users have today.
+      - file: examples/rules/mock-api.example.com/index.js
+        location: examples/rules/mock-api.example.com/index.js:24
+        snippet: Full static mocks are still tied to a single domain folder.
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: discoverPlugins
+      responsibility: Scans rules directory, imports rule modules, and derives domain names from file/folder paths.
+      location: src/plugins/discover-plugins.ts
+      relationship_to_domain: domain fixtures/examples feed directly into this loader
+    - component: PluginRegistry
+      responsibility: Normalizes hostnames, orders entries by priority, and resolves the active rule.
+      location: src/plugins/plugin-registry.ts
+      relationship_to_domain: tests asserting matching semantics target this class directly
+    - component: loadConfig
+      responsibility: Resolves active rules directory from global/project config and CLI overrides.
+      location: src/config/load-config.ts
+      relationship_to_domain: fixture config and config tests define where authored rules are discovered from
+    - component: response pipeline / http handler
+      responsibility: Executes hook methods on the selected rule during request and response handling.
+      location: src/proxy/response-pipeline.ts and src/proxy/http-handler.ts
+      relationship_to_domain: end-to-end tests verify authored hook behavior after selection succeeds
+  interfaces_used_by_domain:
+    - interface: ProxyRule
+      location: src/plugins/types.ts
+      usage_pattern: Example and fixture modules implement optional hook properties plus `target`, `resolveTarget`, `logging`, and `priority`
+  data_flow_involving_domain: Config selects `rulesDir` -> discovery imports domain-scoped modules from filesystem -> registry stores `{domain, rule, priority}` entries -> incoming host header is normalized/exact-matched -> selected rule hooks run in HTTP/response pipeline.
+  key_relationships_to_domain:
+    - from: tests/fixtures/proxy-rules/rules/*
+      to: src/plugins/discover-plugins.ts
+      relationship: imported-by
+    - from: src/plugins/discover-plugins.ts
+      to: src/plugins/plugin-registry.ts
+      relationship: provides discovered plugin entries
+    - from: tests/plugins.test.ts
+      to: src/plugins/discover-plugins.ts
+      relationship: tests
+    - from: tests/plugins.test.ts
+      to: src/plugins/plugin-registry.ts
+      relationship: tests
+    - from: tests/response-pipeline.test.ts
+      to: src/proxy/http-handler.ts
+      relationship: tests
+
+related_technology_stack:
+  languages_used_in_domain:
+    - TypeScript
+    - JavaScript
+    - Markdown
+    - JSON
+  frameworks_used_in_domain:
+    - name: Vitest
+      usage_in_domain: Unit/integration testing in `tests/*.test.ts`
+  libraries_used_in_domain:
+    - name: Node.js stdlib
+      purpose_in_domain: HTTP primitives, filesystem-based fixtures, temp dirs, watchers, and module loading
+    - name: vite-node
+      purpose_in_domain: Mentioned in docs as the runtime that enables TypeScript-authored rules during development
+  external_apis_used_in_domain:
+    - name: dummyjson.com
+      integration_point: Live response-pipeline integration tests in `tests/response-pipeline.test.ts`
+
+related_conventions:
+  naming_patterns_in_domain: Domain folders and files use literal hostnames (`api.example.com`, `httpbin.org`, `monitored.internal`); examples name one folder per scenario/capability but still keep the hostname-shaped directory.
+  structure_of_domain: Examples and fixtures use a single `index.js`/`index.ts` exporting `rule`; multi-module composition is documented in `README.md` but not represented in the test fixtures reviewed here.
+  error_handling_in_domain: Rule examples typically return `undefined` to preserve passthrough behavior on non-matching content types or parse failures; tests assert null/no-rule outcomes rather than throwing for unknown domains.
+  testing_in_domain: Selection and discovery are asserted with filesystem fixtures and temp dirs; hook behavior is asserted separately with direct in-memory rules or live proxy requests.
+  documentation_in_domain: User-facing docs mirror shipped example folders and explain hooks with copy-paste snippets tied to domain-specific rule paths.
+
+related_dependencies:
+  internal:
+    - component: src/plugins/discover-plugins.ts
+      relationship_to_domain: consumes authored fixture/example patterns
+      direction: inbound
+    - component: src/plugins/plugin-registry.ts
+      relationship_to_domain: resolves authored rules for requests
+      direction: inbound
+    - component: src/proxy/http-handler.ts
+      relationship_to_domain: invokes selected rule request/response hooks
+      direction: inbound
+    - component: src/proxy/response-pipeline.ts
+      relationship_to_domain: invokes body modifiers and response hooks
+      direction: inbound
+  external:
+    - name: vitest
+      purpose_for_domain: test execution
+
+testing_patterns:
+  framework: Vitest
+  coverage_areas:
+    - plugin discovery from fixture directories
+    - hostname normalization and exact-domain resolution
+    - rules directory selection through config merging
+    - watch-based hot reload of updated rule modules
+    - end-to-end response-body hook execution through a real proxy
+  test_organization: Tests are grouped by subsystem (`plugins`, `watch-rules`, `config`, `response-pipeline`) rather than by individual hook type alone.
+  mock_patterns:
+    - Temporary rules directories and emitted module files for discovery/hot-reload tests
+    - Real `PluginRegistry` instances populated with fixture or in-memory rules
+    - Live upstream HTTP requests in response-pipeline integration coverage
+
+test_addition_seams:
+  - file: /Users/admin/dev/proxy-rules/tests/plugins.test.ts
+    why_it_fits: Existing home for discovery plus registry selection semantics; best-aligned place for global-rule loading precedence and host/match resolution cases.
+    likely_cases:
+      - global rule discovered alongside domain rules
+      - precedence between exact-domain and global matches
+      - match variant selection for string, RegExp, sync function, and async function
+      - priority interaction when multiple rules could match
+  - file: /Users/admin/dev/proxy-rules/tests/watch-rules.test.ts
+    why_it_fits: Already verifies authored rule files can be reloaded from disk; natural place to cover hot-reload of global-rule files or changed match expressions.
+    likely_cases:
+      - reload after changing global matcher contents
+      - reload after adding/removing a global rule artifact
+  - file: /Users/admin/dev/proxy-rules/tests/response-pipeline.test.ts
+    why_it_fits: Best place to prove that once a global/matched rule is selected, sync and async hook behavior still executes correctly through the full proxy path.
+    likely_cases:
+      - selected global rule mutates live response body
+      - selected async-matched rule still preserves runtime hook semantics and headers/content-length correctness
+  - file: /Users/admin/dev/proxy-rules/tests/config.test.ts
+    why_it_fits: Relevant if global rules introduce new path/config semantics or need resolution from merged global/project config.
+    likely_cases:
+      - config-driven global rules path
+      - coexistence of project rules and global rules directories
+
+docs_likely_needing_updates:
+  - file: /Users/admin/dev/proxy-rules/README.md
+    areas:
+      - Rule plugins intro at README.md:130 because it currently says matching is normalized hostname plus folder lookup
+      - Dynamic upstream target at README.md:289 if `match` becomes a first-class selector distinct from `resolveTarget`
+      - Multi-module domains at README.md:320 if global rules are file/folder based but not domain-folder based
+  - file: /Users/admin/dev/proxy-rules/examples/README.md
+    areas:
+      - Examples catalog at examples/README.md:12 because it currently enumerates only domain-folder examples
+      - Dynamic target and selective interception sections because those are the closest current user-facing analogues to richer matching semantics
+  - file: /Users/admin/dev/proxy-rules/examples/rules/
+    areas:
+      - Add at least one example demonstrating a global rule and one demonstrating explicit match variants; current examples are all hostname-folder scoped
+  - file: /Users/admin/dev/proxy-rules/src/plugins/types.ts
+    areas:
+      - Public `ProxyRule` type docs around `resolveTarget`, hooks, and `priority` if a new `match` field becomes part of rule authoring
+
+open_questions:
+  - question: What filesystem shape will identify a global rule?
+    context: All current fixtures/examples rely on domain-derived names from folder/file paths; the loader and docs do not expose a non-domain naming convention today.
+  - question: How should `match` interact with existing exact-domain lookup and `priority` ordering?
+    context: Registry tests and type docs already encode exact candidate lookup plus optional priority, but no current examples/tests define multi-match precedence rules.
+  - question: Will async function matchers be supported during registry resolution time, request handling time, or both?
+    context: Existing rule async support is documented for hooks and `resolveTarget`, but resolution tests are synchronous today.
+  - question: Should multi-module composition apply to global rules as well?
+    context: `README.md` documents alphabetical composition inside domain folders, but fixtures do not currently exercise that pattern.
+
+gaps:
+  - area: explicit global rule examples
+    description: No shipped example or fixture demonstrates a rule that is not keyed by a literal domain path.
+    impact: Matching semantics for global rules are undocumented by example today.
+  - area: match-field coverage
+    description: No current test, fixture, or public doc uses a `match` property or equivalent declarative matcher.
+    impact: New match variants will require new ground-truth examples and selection tests rather than extension of an existing pattern.
+  - area: multi-rule precedence coverage
+    description: Current tests cover one resolved rule at a time and priority storage, but not multiple simultaneously matching rules.
+    impact: Hidden precedence behaviors for global + domain-specific rules are currently unpinned by tests.

@@ -6,6 +6,7 @@ Ready-to-use rule examples demonstrating the two main interception capabilities:
 |---|---|---|
 | **Static response** | Return a `StaticResponse` from `onRequest` | Never — response goes straight to the client |
 | **Dynamic target** | Implement `resolveTarget` | Always — but at the URL you choose |
+| **HTTP-global URL matching** | Put a rule under `rules/global` and set `match` | Depends on the composed global/domain rules |
 
 ---
 
@@ -17,12 +18,43 @@ Ready-to-use rule examples demonstrating the two main interception capabilities:
 | [`maintenance.example.com`](rules/maintenance.example.com/index.js) | Serve a 503 HTML maintenance page unconditionally |
 | [`api.example.com`](rules/api.example.com/index.js) | Block specific paths with 403; forward everything else |
 | [`gateway.example.com`](rules/gateway.example.com/index.js) | Route requests to different backends based on URL path |
+| [`global/path-prefix.js`](rules/global/path-prefix.js) | Match every `/v1/` URL across hosts and compose with any matching domain rule |
 | [`shop.example.com`](rules/shop.example.com/index.js) | A/B split — send 20 % of traffic to a canary backend |
 | [`cors.example.com`](rules/cors.example.com/index.js) | Handle `OPTIONS` preflight locally; forward real requests |
 | [`headers.example.com`](rules/headers.example.com/index.js) | Add, override, and remove **request headers** before forwarding |
 | [`payload.example.com`](rules/payload.example.com/index.js) | Mutate **request body** (JSON / form) via `modifyRequestBody` |
 | [`resp-headers.example.com`](rules/resp-headers.example.com/index.js) | Inject security headers and rewrite **response headers** |
 | [`resp-body.example.com`](rules/resp-body.example.com/index.js) | Rewrite **response body** — JSON, HTML, plain text, and JS |
+
+---
+
+## Choosing a global rule vs. a domain rule
+
+Use a **global rule** when the trigger is about the request URL pattern and should work across multiple hosts.
+Use a **domain rule** when the behavior belongs to one hostname, one backend, or one host-specific policy.
+
+| Choose this | When it fits best |
+|---|---|
+| `rules/global/<name>.js` | You want one HTTP rule to apply across many hosts, gated by URL matching |
+| `rules/<domain>/index.js` | You want host-specific targeting, blocking, headers, or body mutation |
+
+Global rules are HTTP-only and run **before** the resolved domain rule for that request. The domain rule runs last, so it can still override `target`, `resolveTarget`, and logging settings, or short-circuit in `onRequest`.
+
+### Coexistence example: `global/path-prefix.js` + `api.example.com`
+
+The example in [`rules/global/path-prefix.js`](rules/global/path-prefix.js) uses a string matcher (`match: '/v1/'`) to tag any matching HTTP request, regardless of host. Pair it with [`rules/api.example.com/index.js`](rules/api.example.com/index.js) to see both scopes working together:
+
+- Requests like `http://api.example.com/v1/users` match the global rule first, then the `api.example.com` domain rule.
+- The global rule adds a cross-cutting marker header/response header for `/v1/` traffic.
+- The domain rule still applies its host-specific behavior afterwards.
+- If the domain rule returns a `StaticResponse`, composition stops there and the upstream is skipped.
+
+Supported on-disk layouts for the global side are:
+
+```text
+~/.proxy-rules/rules/global/path-prefix.js
+~/.proxy-rules/rules/global/path-prefix/index.js
+```
 
 ---
 
@@ -322,6 +354,21 @@ Copy any example folder into your active rules directory:
 
 ```bash
 cp -r examples/rules/mock-api.example.com ~/.proxy-rules/rules/
+```
+
+For a global rule, copy it into the reserved `global/` namespace:
+
+```bash
+mkdir -p ~/.proxy-rules/rules/global
+cp examples/rules/global/path-prefix.js ~/.proxy-rules/rules/global/path-prefix.js
+```
+
+To try the coexistence example, copy both the global rule and a domain rule:
+
+```bash
+mkdir -p ~/.proxy-rules/rules/global
+cp examples/rules/global/path-prefix.js ~/.proxy-rules/rules/global/path-prefix.js
+cp -r examples/rules/api.example.com ~/.proxy-rules/rules/
 ```
 
 Then start (or hot-reload) the proxy:

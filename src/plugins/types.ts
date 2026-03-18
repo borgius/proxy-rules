@@ -140,6 +140,13 @@ export interface ConnectContext {
   domain: string;
 }
 
+export type ProxyRuleMatchFn = (
+  url: string,
+  req: http.IncomingMessage,
+) => boolean | Promise<boolean>;
+
+export type ProxyRuleMatch = string | RegExp | ProxyRuleMatchFn;
+
 // ---------------------------------------------------------------------------
 // Per-domain rule (plugin) contract
 // ---------------------------------------------------------------------------
@@ -152,6 +159,18 @@ export interface RuleLogging {
 }
 
 export interface ProxyRule {
+  /**
+   * Optional HTTP matcher for rules discovered from `rules/global`.
+   *
+   * Supported variants:
+   * - string: matched later against the full request URL
+   * - RegExp: tested against the full request URL
+   * - function: receives `(url, req)` and returns a boolean, sync or async
+   *
+   * This property is ignored for normal `rules/<domain>` rules.
+   */
+  match?: ProxyRuleMatch;
+
   /**
    * Upstream target. May be overridden per-request via `resolveTarget`.
    * Required unless `resolveTarget` dynamically resolves the target.
@@ -189,7 +208,7 @@ export interface ProxyRule {
    *   ctx.proxyReq.setHeader('X-Internal', '1');
    * }
    */
-  onRequest?: (ctx: RequestContext) => void | StaticResponse | Promise<void | StaticResponse>;
+  onRequest?: (ctx: RequestContext) => StaticResponse | undefined | Promise<StaticResponse | undefined>;
 
   /**
    * Called with the complete request body before it is forwarded to the upstream.

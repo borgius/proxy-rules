@@ -9,6 +9,10 @@ import type { StaticResponse } from "../plugins/types.ts";
 import { createContextHelpers } from "../plugins/context-helpers.ts";
 import { runResponsePipeline, bufferIncomingBody } from "./response-pipeline.ts";
 
+type PipeOverridableRequest = http.IncomingMessage & {
+  proxyTarget?: string;
+};
+
 function sendStaticResponse(res: http.ServerResponse, sr: StaticResponse): void {
   const { status = 200, headers = {}, body = "", contentType } = sr;
   const responseHeaders: http.OutgoingHttpHeaders = { ...headers };
@@ -37,15 +41,18 @@ export async function handleHttpRequest(
 
   const rawHost = req.headers["host"] ?? "";
   const hostname = extractHostname(rawHost);
-  const domain = normalizeHostname(hostname, config.ignoreSubDomains);
-  const rule = registry.resolve(rawHost);
+  const fallbackDomain = normalizeHostname(hostname, config.ignoreSubDomains);
+  const resolvedRule = await registry.resolveHttpRule(rawHost, req);
+  const domain = resolvedRule.domain || fallbackDomain;
+  const rule = resolvedRule.rule;
+  const requestUrl = resolvedRule.url;
 
   const startTime = Date.now();
 
   if (rule) {
     logger.info("→ HTTP", {
       method: req.method,
-      url: req.url,
+      url: requestUrl,
       domain,
     });
   }
@@ -93,8 +100,8 @@ export async function handleHttpRequest(
       preBufferedRequestBody = await bufferIncomingBody(req, modifyMaxBytes);
       if (preBufferedRequestBody !== null) {
         // Prevent http-proxy from trying to pipe the already-consumed stream.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (req as any).pipe = () => req;
+        const noopPipe: typeof req.pipe = <T extends NodeJS.WritableStream>(destination: T) => destination;
+        (req as PipeOverridableRequest).pipe = noopPipe;
       }
     }
   }
@@ -103,7 +110,7 @@ export async function handleHttpRequest(
   // the shared proxy here, otherwise stale `once` handlers accumulate and fire for
   // the wrong concurrent requests.
   if (rule?.modifyResponseBody) {
-    runResponsePipeline(req, res, proxy, target, rule, domain, config, logger, preBufferedRequestBody);
+    runResponsePipeline(req, res, proxy, target, rule, domain, requestUrl, config, logger, preBufferedRequestBody);
     return;
   }
 
@@ -117,7 +124,7 @@ export async function handleHttpRequest(
           proxyReq,
           res,
           domain,
-          url: req.url ?? "",
+          url: requestUrl,
         });
         if (result != null) {
           // onRequest returned a StaticResponse — short-circuit the upstream.
@@ -150,7 +157,7 @@ export async function handleHttpRequest(
             proxyReq,
             res,
             domain,
-            url: req.url ?? "",
+            url: requestUrl,
             contentType,
           });
         } catch (err) {
@@ -184,7 +191,7 @@ export async function handleHttpRequest(
       const elapsed = Date.now() - startTime;
       logger.info("← HTTP", {
         method: req.method,
-        url: req.url,
+        url: requestUrl,
         domain,
         status: proxyRes.statusCode,
         ms: elapsed,
