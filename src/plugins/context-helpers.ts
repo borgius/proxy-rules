@@ -9,9 +9,10 @@ const BASE64_LINE_WIDTH = 76;
 
 export function buildRequestUrl(req: http.IncomingMessage): string {
   const reqUrl = req.url ?? "/";
+  const protocol = (req.socket as { encrypted?: boolean } | undefined)?.encrypted ? "https" : "http";
   const absoluteUrl = reqUrl.startsWith("http://") || reqUrl.startsWith("https://")
     ? reqUrl
-    : `${(req.socket as { encrypted?: boolean }).encrypted ? "https" : "http"}://${req.headers["host"] ?? "localhost"}${reqUrl}`;
+    : `${protocol}://${req.headers["host"] ?? "localhost"}${reqUrl}`;
 
   try {
     const parsed = new URL(absoluteUrl);

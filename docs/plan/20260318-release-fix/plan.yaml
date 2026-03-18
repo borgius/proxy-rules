@@ -1,0 +1,172 @@
+plan_id: 20260318-release-fix
+objective: Fix the release-blocking logging regression caused by `buildRequestUrl()` throwing when test requests omit `req.socket`, then re-run `nr release`.
+created_at: 2026-03-18T00:00:00Z
+created_by: GitHub Copilot (GPT-5.4) / gem-planner
+status: pending_approval
+research_confidence: high
+
+tldr: |
+  The release is currently blocked by `tests/proxy-logging.test.ts`, where synthetic HTTP requests omit `req.socket` and `buildRequestUrl()` dereferences `req.socket.encrypted` while constructing an absolute URL for logging helpers.
+  The narrowest safe fix is to make URL reconstruction tolerate missing sockets and fall back to plain HTTP semantics for socket-less test requests, then verify the logging regression with a focused test run before retrying the full `nr release` flow.
+  Rollback posture: keep the change isolated to request URL reconstruction and its direct verification path so it can be reverted without affecting rule discovery, proxy routing, or release packaging behavior.
+
+open_questions:
+  - None; the failure mode, fix seam, and verification path are already identified.
+
+pre_mortem:
+  overall_risk_level: low
+  critical_failure_modes:
+    - scenario: The null-safe guard changes URL reconstruction semantics for real proxied requests and silently alters logged scheme/host formatting.
+      likelihood: low
+      impact: medium
+      mitigation: Limit the fallback to the missing-socket case, preserve the current absolute-URL parsing/normalization path, and verify only the logging-focused suite before the release rerun.
+    - scenario: The targeted test passes but the broader release workflow still fails on a different packaging, typecheck, or test step.
+      likelihood: medium
+      impact: high
+      mitigation: Keep the verification wave explicit, then run the full `nr release` command as a separate final gate so any remaining blockers are surfaced cleanly.
+  assumptions:
+    - Missing `req.socket` occurs in synthetic unit/integration tests and should not crash helper-driven logging.
+    - Falling back to `http` when there is no socket encryption signal is acceptable for these synthetic requests.
+    - The release command still maps to the repository's established build/test/typecheck/package validation flow.
+
+implementation_specification:
+  code_structure: |
+    Keep the fix inside `src/plugins/context-helpers.ts` by making `buildRequestUrl()` resilient to absent sockets without changing the helper API. Verification should stay outside the implementation by using the existing logging test suite and the established release command.
+  affected_areas:
+    - src/plugins/context-helpers.ts
+    - tests/proxy-logging.test.ts
+    - package.json
+  component_details:
+    - component: Request URL reconstruction fallback
+      responsibility: Build an absolute URL for helper/logging use even when synthetic requests do not provide `req.socket`.
+      interfaces:
+        - "`buildRequestUrl(req)` continues returning a normalized absolute URL string for both absolute and relative request URLs."
+        - "Relative URLs default to `http://<host>` when no socket encryption metadata exists."
+    - component: Targeted regression verification
+      responsibility: Prove the logging path no longer throws and expected HTTP log lines are emitted for matched rules.
+      interfaces:
+        - "`tests/proxy-logging.test.ts` passes without requiring broader suite execution."
+    - component: Release gate rerun
+      responsibility: Re-execute the full release workflow after the focused fix is verified.
+      interfaces:
+        - "`nr release` completes successfully or reports the next independent blocker."
+  dependencies:
+    - component: Targeted regression verification
+      relationship: Depends on the URL reconstruction fallback being implemented first.
+    - component: Release gate rerun
+      relationship: Depends on the focused regression verification completing successfully.
+  integration_points:
+    - Logging helper path in `src/plugins/context-helpers.ts`
+    - Focused logging regression suite in `tests/proxy-logging.test.ts`
+    - Release automation entrypoint exposed through the workspace terminal command `nr release`
+
+contracts:
+  - from_task: RF-1
+    to_task: RF-2
+    interface: `buildRequestUrl()` no longer throws when `req.socket` is absent and preserves current URL normalization behavior for normal requests.
+    format: "Source-level change in `src/plugins/context-helpers.ts` with unchanged helper signature."
+  - from_task: RF-2
+    to_task: RF-3
+    interface: Focused regression evidence confirms HTTP logging is restored for matching rules.
+    format: "Passing targeted test run for `tests/proxy-logging.test.ts` (and adjacent helper coverage if needed)."
+
+tasks:
+  - id: RF-1
+    title: Harden request URL reconstruction for socket-less test requests
+    description: |
+      Make the smallest possible change in `src/plugins/context-helpers.ts` so `buildRequestUrl()` tolerates requests that omit `req.socket`.
+      Preserve existing behavior for absolute URLs and encrypted sockets, but default relative-path reconstruction to non-TLS semantics when the socket is missing.
+      Rollback note: revert the fallback guard if it unexpectedly changes runtime URL formatting outside tests.
+    wave: 1
+    agent: gem-implementer
+    priority: high
+    status: completed
+    dependencies: []
+    context_files:
+      - /Users/admin/dev/proxy-rules/src/plugins/context-helpers.ts: Current `buildRequestUrl()` implementation dereferences `req.socket.encrypted` while constructing absolute URLs.
+      - /Users/admin/dev/proxy-rules/tests/proxy-logging.test.ts: Synthetic HTTP requests intentionally omit `socket` and rely on helper-driven logging.
+    estimated_effort: small
+    estimated_files: 1
+    estimated_lines: 20
+    focus_area: null
+    verification:
+      - Inspect the updated fallback logic to confirm it only affects the missing-socket branch.
+      - Check that absolute URLs and default-port normalization still flow through the existing parsing path.
+    acceptance_criteria:
+      - Relative request URLs no longer throw when `req.socket` is undefined.
+      - Existing helper signature and URL normalization behavior remain unchanged for normal requests.
+    failure_modes:
+      - scenario: The fallback accidentally treats encrypted requests as plain HTTP when a socket exists but is partially stubbed.
+        likelihood: low
+        impact: medium
+        mitigation: Guard specifically on optional socket/encrypted access and preserve the current branch when encryption metadata is present.
+    tech_stack:
+      - TypeScript
+      - Node.js HTTP primitives
+    test_coverage: Existing logging regression coverage in `tests/proxy-logging.test.ts`; add a narrow assertion only if the source fix alone is insufficient to lock the behavior.
+
+  - id: RF-2
+    title: Verify the logging regression with focused tests
+    description: |
+      Run the smallest verification set that proves the release blocker is fixed.
+      Start with `tests/proxy-logging.test.ts`, and include adjacent helper-focused coverage only if the first run shows the fix needs an extra regression assertion or helper validation.
+    wave: 2
+    agent: gem-implementer
+    priority: medium
+    status: completed
+    dependencies:
+      - RF-1
+    context_files:
+      - /Users/admin/dev/proxy-rules/tests/proxy-logging.test.ts: Primary release-blocking suite that should resume emitting expected HTTP logs.
+      - /Users/admin/dev/proxy-rules/tests/context-helpers.test.ts: Nearby helper coverage to consult only if the focused logging test exposes a missing direct assertion.
+    estimated_effort: small
+    estimated_files: 2
+    estimated_lines: 40
+    focus_area: logging regression
+    verification:
+      - Execute `tests/proxy-logging.test.ts` and confirm all assertions pass.
+      - If additional helper assertions are added, rerun only the affected helper test file as a second focused check.
+    acceptance_criteria:
+      - The matched-rule HTTP logging test emits both request and response log entries without crashing.
+      - No unrelated test suites need modification to validate the fix.
+    failure_modes:
+      - scenario: The focused suite passes only because logging output changed in a brittle way, leaving helper behavior under-specified.
+        likelihood: medium
+        impact: medium
+        mitigation: Add or reuse the narrowest helper/logging assertion that directly covers the missing-socket branch before moving to the release rerun.
+    tech_stack:
+      - Vitest
+      - TypeScript
+    test_coverage: Focused on `tests/proxy-logging.test.ts`, with optional adjacent helper coverage if needed.
+
+  - id: RF-3
+    title: Re-run the full release workflow after the fix is proven
+    description: |
+      Re-execute `nr release` once the focused regression suite is green.
+      Treat this as the final gate: either the release completes successfully or it surfaces the next independent blocker for a follow-up plan.
+    wave: 3
+    agent: gem-devops
+    priority: medium
+    status: failed
+    dependencies:
+      - RF-2
+    context_files:
+      - /Users/admin/dev/proxy-rules/package.json: Defines the repository release script entrypoint and adjacent validation scripts.
+      - /Users/admin/dev/proxy-rules/scripts/release.mjs: Underlying release flow invoked by `nr release` if deeper diagnosis becomes necessary.
+    estimated_effort: small
+    estimated_files: 1
+    estimated_lines: 0
+    focus_area: release validation
+    verification:
+      - Run `nr release` from the repository root after targeted tests pass.
+      - Capture whether the workflow completes or stops at a new independent failure.
+    acceptance_criteria:
+      - `nr release` succeeds end-to-end, or any remaining failure is clearly distinct from the missing-socket logging regression.
+    failure_modes:
+      - scenario: The release workflow fails at a later stage unrelated to the logging fix, creating a false impression that the patch did not work.
+        likelihood: medium
+        impact: high
+        mitigation: Preserve the explicit sequencing from focused test pass to release rerun so the original blocker is isolated from any newly surfaced issue.
+    environment: development
+    requires_approval: false
+    security_sensitive: false

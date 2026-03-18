@@ -1,0 +1,277 @@
+plan_id: 20260318-release-fix
+objective: Fix the current failing release caused by tests/proxy-logging.test.ts and then rerun `nr release`
+focus_area: release_failure_proxy_logging
+created_at: '2026-03-18T00:00:00Z'
+created_by: GitHub Copilot gem-researcher
+status: completed
+
+tldr: |
+  - The failing HTTP logging test enters `handleHttpRequest()`, but execution rejects before any traffic log is emitted because `PluginRegistry.resolveHttpRule()` calls `buildRequestUrl()` and that helper dereferences `req.socket.encrypted` on a mock request that has no `socket`.
+  - The exact runtime path is `tests/proxy-logging.test.ts` → `handleHttpRequest()` → `registry.resolveHttpRule(rawHost, req)` → `buildRequestUrl(req)`; the request logger (`"→ HTTP"`) and response logger (`"← HTTP"`) both sit after that failure point.
+  - The safest minimal fix is to harden `buildRequestUrl()` against a missing runtime `req.socket` while preserving current behavior for absolute URLs, CONNECT-decrypted HTTPS requests, and relative HTTP requests.
+  - Before rerunning `nr release`, verify the focused logging test passes without unhandled rejections and that shared URL-reconstruction behavior still passes its helper and rule-resolution coverage.
+
+research_metadata:
+  methodology: hybrid retrieval with semantic_search, grep_search, targeted read_file inspection, repository memory review, and one focused Vitest run for the failing file
+  scope: focused on HTTP traffic logging, shared request URL reconstruction, HTTP rule resolution, and directly related tests/mocks
+  confidence: high
+  coverage: 86
+
+files_analyzed:
+  - file: proxy-logging.test.ts
+    path: tests/proxy-logging.test.ts
+    purpose: Reproduces built-in HTTP and WebSocket traffic logging behavior using lightweight request/proxy mocks.
+    key_elements:
+      - element: emits HTTP request logs when a rule matches
+        type: function
+        location: tests/proxy-logging.test.ts:113
+        description: Calls `handleHttpRequest()` with a plain object cast as `IncomingMessage` and expects both request and response logs.
+      - element: createProxy
+        type: function
+        location: tests/proxy-logging.test.ts:61
+        description: Test proxy stub that only triggers the registered `proxyRes` listener during `web()`.
+      - element: captureStdout
+        type: function
+        location: tests/proxy-logging.test.ts:42
+        description: Captures stdout so the test can assert logged JSON output.
+    language: TypeScript
+    lines: 169
+
+  - file: http-handler.ts
+    path: src/proxy/http-handler.ts
+    purpose: Main HTTP request entry point; resolves the effective rule, computes target, and emits built-in request/response traffic logs around proxy execution.
+    key_elements:
+      - element: handleHttpRequest
+        type: function
+        location: src/proxy/http-handler.ts:29
+        description: Resolves the HTTP rule via the registry before emitting `→ HTTP`, then emits `← HTTP` from the `proxyRes` handler.
+      - element: logger.info("→ HTTP")
+        type: pattern
+        location: src/proxy/http-handler.ts:53
+        description: Request log emitted only after `resolveHttpRule()` succeeds.
+      - element: logger.info("← HTTP")
+        type: pattern
+        location: src/proxy/http-handler.ts:192
+        description: Response log emitted in the shared proxy `proxyRes` callback.
+    language: TypeScript
+    lines: 206
+
+  - file: plugin-registry.ts
+    path: src/plugins/plugin-registry.ts
+    purpose: Resolves domain and global rules for HTTP requests and composes matched rules into a single effective rule.
+    key_elements:
+      - element: resolveHttpRule
+        type: function
+        location: src/plugins/plugin-registry.ts:221
+        description: Builds the request URL, resolves the domain rule, evaluates global matchers, and returns the effective rule.
+      - element: buildRequestUrl(req)
+        type: pattern
+        location: src/plugins/plugin-registry.ts:227
+        description: Shared URL normalization dependency executed before the request handler can log anything.
+    language: TypeScript
+    lines: 278
+
+  - file: context-helpers.ts
+    path: src/plugins/context-helpers.ts
+    purpose: Implements helper utilities shared by rule hooks, including absolute request URL reconstruction.
+    key_elements:
+      - element: buildRequestUrl
+        type: function
+        location: src/plugins/context-helpers.ts:10
+        description: Reconstructs an absolute URL from `req.url`, `req.headers.host`, and transport encryption state; currently assumes `req.socket` exists at runtime.
+      - element: createContextHelpers
+        type: function
+        location: src/plugins/context-helpers.ts:188
+        description: Exposes helper functions used by `onResponse` and other hook contexts.
+    language: TypeScript
+    lines: 190
+
+  - file: context-helpers.test.ts
+    path: tests/context-helpers.test.ts
+    purpose: Validates URL reconstruction and helper formatting behavior for `toCurl`, `toFetch`, `toJson`, and `saveTo`.
+    key_elements:
+      - element: builds absolute URL from host header + relative path
+        type: function
+        location: tests/context-helpers.test.ts:80
+        description: Confirms relative paths are normalized into absolute URLs.
+      - element: keeps absolute URL when request already has one
+        type: function
+        location: tests/context-helpers.test.ts:87
+        description: Confirms existing absolute URLs bypass reconstruction.
+    language: TypeScript
+    lines: 309
+
+  - file: websocket-handler.ts
+    path: src/proxy/websocket-handler.ts
+    purpose: Provides a comparison path showing built-in WebSocket upgrade logging does not depend on `buildRequestUrl()`.
+    key_elements:
+      - element: handleWebSocketUpgrade
+        type: function
+        location: src/proxy/websocket-handler.ts:12
+        description: Emits `⬌ WS upgrade` after host-only rule resolution, which is why the WebSocket logging tests still pass.
+    language: TypeScript
+    lines: 56
+
+  - file: logger.ts
+    path: src/logging/logger.ts
+    purpose: Formats and emits JSON/pretty logs to stdout or stderr.
+    key_elements:
+      - element: Logger.info
+        type: function
+        location: src/logging/logger.ts:72
+        description: Sends info-level JSON logs to stdout, which is what the failing test captures.
+    language: TypeScript
+    lines: 104
+
+patterns_found:
+  - category: architecture
+    pattern: HTTP request handling resolves the effective rule before any built-in traffic logging
+    description: The request handler must obtain `{ domain, url, rule }` from `resolveHttpRule()` before it can emit request logs or register proxy listeners.
+    examples:
+      - file: src/proxy/http-handler.ts
+        location: src/proxy/http-handler.ts:42-55
+        snippet: const resolvedRule = await registry.resolveHttpRule(rawHost, req); ... if (rule) { logger.info("→ HTTP", ...) }
+      - file: src/plugins/plugin-registry.ts
+        location: src/plugins/plugin-registry.ts:221-227
+        snippet: async resolveHttpRule(...) { ... const url = buildRequestUrl(req); ... }
+    prevalence: common
+
+  - category: error_handling
+    pattern: Shared URL reconstruction assumes runtime Node request shape
+    description: `buildRequestUrl()` relies on `req.socket.encrypted` without guarding for mock objects cast to `IncomingMessage`.
+    examples:
+      - file: src/plugins/context-helpers.ts
+        location: src/plugins/context-helpers.ts:10-14
+        snippet: `${(req.socket as { encrypted?: boolean }).encrypted ? "https" : "http"}://...`
+      - file: tests/proxy-logging.test.ts
+        location: tests/proxy-logging.test.ts:114-123
+        snippet: handleHttpRequest({ headers: { host: "monitored.internal" }, method: "GET", url: "/status" } as http.IncomingMessage, ...)
+    prevalence: occasional
+
+  - category: testing
+    pattern: Lightweight logging tests use structural casts instead of fully constructed `IncomingMessage` objects
+    description: The logging tests intentionally pass minimal plain objects to isolate logging behavior and avoid live sockets.
+    examples:
+      - file: tests/proxy-logging.test.ts
+        location: tests/proxy-logging.test.ts:96-123
+        snippet: { headers: { host: ... }, method: "GET", url: "/status" } as http.IncomingMessage
+      - file: tests/context-helpers.test.ts
+        location: tests/context-helpers.test.ts:16-28
+        snippet: const req = new http.IncomingMessage(createServer().listen(0) as never);
+    prevalence: occasional
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: HTTP request handler
+      responsibility: Orchestrates rule resolution, target selection, hook invocation, and built-in request/response logging.
+      location: src/proxy/http-handler.ts
+      relationship_to_domain: domain depends on this
+    - component: Plugin registry
+      responsibility: Produces the effective HTTP rule and normalized URL for a request.
+      location: src/plugins/plugin-registry.ts
+      relationship_to_domain: domain depends on this
+    - component: Context helpers
+      responsibility: Shared URL normalization and helper generation for rule hook contexts.
+      location: src/plugins/context-helpers.ts
+      relationship_to_domain: domain depends on this
+    - component: WebSocket handler
+      responsibility: Comparison path for traffic logging that avoids request URL reconstruction.
+      location: src/proxy/websocket-handler.ts
+      relationship_to_domain: this uses domain outputs
+  interfaces_used_by_domain:
+    - interface: ProxyRule
+      location: src/plugins/types.ts
+      usage_pattern: Effective HTTP rules are resolved first, then traffic logging occurs only when the resolved rule is non-null.
+    - interface: http.IncomingMessage
+      location: node:http (runtime type usage)
+      usage_pattern: Code expects a real request object, but tests may provide structural mocks missing `socket`.
+  data_flow_involving_domain: tests/proxy-logging.test.ts invokes `handleHttpRequest()` with a minimal request object; `handleHttpRequest()` asks `PluginRegistry.resolveHttpRule()` for `{ domain, url, rule }`; `resolveHttpRule()` calls `buildRequestUrl(req)`; after successful resolution the handler emits `"→ HTTP"`, calls `proxy.web()`, and later emits `"← HTTP"` from the `proxyRes` callback.
+  key_relationships_to_domain:
+    - from: tests/proxy-logging.test.ts
+      to: src/proxy/http-handler.ts
+      relationship: calls
+    - from: src/proxy/http-handler.ts
+      to: src/plugins/plugin-registry.ts
+      relationship: calls
+    - from: src/plugins/plugin-registry.ts
+      to: src/plugins/context-helpers.ts
+      relationship: imports
+    - from: src/proxy/http-handler.ts
+      to: src/logging/logger.ts
+      relationship: calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - TypeScript
+  frameworks_used_in_domain:
+    - name: Vitest
+      usage_in_domain: Unit-style and lightweight integration-style test execution for proxy behavior.
+  libraries_used_in_domain:
+    - name: node:http
+      purpose_in_domain: Request/response transport types and runtime behavior.
+    - name: http-proxy
+      purpose_in_domain: Shared proxy transport used by the HTTP handler.
+    - name: picocolors
+      purpose_in_domain: Pretty log formatting, though the failing test uses JSON log format.
+  external_apis_used_in_domain: []
+
+related_conventions:
+  naming_patterns_in_domain: Handler functions use `handle*` names; request URL helpers use `build*`; log messages use short directional markers like `→ HTTP`, `← HTTP`, and `⬌ WS upgrade`.
+  structure_of_domain: Transport handlers live under `src/proxy`, registry/helper logic under `src/plugins`, and behavior-focused tests mirror the runtime entry points under `tests/`.
+  error_handling_in_domain: Hook failures are caught and logged inside handlers, but pre-log setup work in `resolveHttpRule()` currently relies on helper safety rather than local try/catch.
+  testing_in_domain: Logging tests use minimal casted request objects; helper tests use real `IncomingMessage` instances backed by temporary servers.
+  documentation_in_domain: `AGENTS.md` documents context helpers as shared utilities injected into hook contexts.
+
+related_dependencies:
+  internal:
+    - component: src/plugins/context-helpers.ts
+      relationship_to_domain: supplies the URL normalization used by HTTP rule resolution and helper APIs
+      direction: outbound
+    - component: src/plugins/plugin-registry.ts
+      relationship_to_domain: computes the effective HTTP rule before logging
+      direction: outbound
+    - component: src/logging/logger.ts
+      relationship_to_domain: emits the JSON records asserted by the failing test
+      direction: outbound
+    - component: src/proxy/websocket-handler.ts
+      relationship_to_domain: sibling transport path demonstrating unaffected WS logging
+      direction: bidirectional
+  external:
+    - name: node:http
+      purpose_for_domain: core request/response object model
+    - name: http-proxy
+      purpose_for_domain: proxy event flow and response callback path
+
+domain_security_considerations:
+  sensitive_areas:
+    - area: Host-header-derived URL reconstruction
+      location: src/plugins/context-helpers.ts:10
+      concern: Scheme and authority are inferred from incoming request metadata; guard logic should not change existing absolute URL handling.
+  authentication_patterns_in_domain: No explicit authentication layer is present in this domain.
+  authorization_patterns_in_domain: No authorization checks are present in this domain.
+  data_validation_in_domain: The current validation gap is runtime shape validation for `req.socket` during URL reconstruction.
+
+testing_patterns:
+  framework: Vitest
+  coverage_areas:
+    - built-in HTTP and WebSocket traffic logging
+    - helper URL reconstruction and curl/fetch/json formatting
+    - HTTP rule resolution with composed rules and URL-based global matching
+  test_organization: Focused unit-style files under `tests/` mirror proxy subsystems and helper modules.
+  mock_patterns:
+    - Plain-object casts to `http.IncomingMessage` for lightweight logging tests
+    - Real `IncomingMessage` instances created from temporary servers for helper behavior tests
+
+open_questions:
+  - question: Are there any additional release-time tests or scripts beyond `bun run test` that instantiate bare request objects without `socket`?
+    context: The shared helper is used by both HTTP rule resolution and hook helpers, so similar mocks outside the focused test could be affected by the same assumption.
+  - question: Should helper coverage explicitly include a missing-`socket` request shape, or is release confidence satisfied by the logging test plus existing helper tests?
+    context: Current helper coverage verifies relative/absolute URL behavior but the inspected portion does not show a runtime-mock safety case.
+
+gaps:
+  - area: Full release script execution
+    description: This research run did not execute `nr release`; it reproduced the focused failing test only.
+    impact: Final release confidence still depends on rerunning the full release pipeline after the targeted fix.
+  - area: Unhandled rejection stack capture from Vitest
+    description: The focused Vitest runner summarized the failure but did not print the separate unhandled rejection entries mentioned in the issue statement.
+    impact: The root cause is still strongly evidenced by static tracing, but the report does not include the exact rejection frames from the full release run.

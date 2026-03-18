@@ -4,7 +4,7 @@ import { createServer } from "node:net";
 import fs from "node:fs/promises";
 import os from "node:os";
 import nodePath from "node:path";
-import { createContextHelpers } from "../src/plugins/context-helpers.ts";
+import { buildRequestUrl, createContextHelpers } from "../src/plugins/context-helpers.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers to build minimal IncomingMessage / ServerResponse mocks
@@ -53,6 +53,31 @@ function makeIncomingRes(overrides: Partial<{
 const helpers = createContextHelpers();
 
 describe("createContextHelpers", () => {
+  describe("buildRequestUrl", () => {
+    test("defaults relative URLs to http when req.socket is absent", () => {
+      const url = buildRequestUrl({
+        headers: { host: "monitored.internal" },
+        url: "/status?verbose=1",
+      } as http.IncomingMessage);
+
+      expect(url).toBe("http://monitored.internal/status?verbose=1");
+    });
+
+    test("uses https for relative URLs when the socket is encrypted", () => {
+      const req = makeIncomingReq({
+        headers: { host: "secure.example.com" },
+        url: "/secure",
+      });
+
+      Object.defineProperty(req, "socket", {
+        configurable: true,
+        value: { encrypted: true },
+      });
+
+      expect(buildRequestUrl(req)).toBe("https://secure.example.com/secure");
+    });
+  });
+
   // ── toCurl ──────────────────────────────────────────────────────────────
 
   describe("toCurl", () => {
