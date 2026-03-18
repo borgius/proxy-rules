@@ -140,6 +140,12 @@ export interface ConnectContext {
   domain: string;
 }
 
+export type OnRequestHandler =
+  | ((ctx: RequestContext) => StaticResponse | undefined)
+  | ((ctx: RequestContext) => void)
+  | ((ctx: RequestContext) => Promise<StaticResponse | undefined>)
+  | ((ctx: RequestContext) => Promise<void>);
+
 export type ProxyRuleMatchFn = (
   url: string,
   req: http.IncomingMessage,
@@ -202,7 +208,9 @@ export interface ProxyRule {
    * Called before the request is forwarded.
    * You can modify proxyReq headers or **return a `StaticResponse`** to
    * short-circuit the proxy entirely — the upstream is never contacted and
-   * the returned response is sent directly to the client.
+    * the returned response is sent directly to the client.
+    *
+    * Returning nothing (or `undefined`) continues normal proxying.
    *
    * @example — intercept selectively
    * onRequest(ctx) {
@@ -212,7 +220,7 @@ export interface ProxyRule {
    *   ctx.proxyReq.setHeader('X-Internal', '1');
    * }
    */
-  onRequest?: (ctx: RequestContext) => StaticResponse | undefined | Promise<StaticResponse | undefined>;
+  onRequest?: OnRequestHandler;
 
   /**
    * Called with the complete request body before it is forwarded to the upstream.
